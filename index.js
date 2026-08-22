@@ -386,6 +386,16 @@ function extractModelName(body) {
     return '未知模型';
 }
 
+function getDisplayModelName(modelName) {
+    if (typeof modelName !== 'string') return modelName;
+
+    // 去掉所有 [] 中的内容，例如 [0.05/次]、[按次Gemini-CLI2]
+    const cleaned = modelName.replace(/\[[^\]]*\]/g, '').trim();
+
+    // 只保留最后一个 / 后面的内容
+    return cleaned.split('/').pop().trim();
+}
+
 function getFullPromptText(record) {
     return record.messages
         .map((m) => `[${m.role}]\n${m.content}`)
@@ -937,7 +947,7 @@ async function processCapturedBody(body, requestUrl, captureId) {
 
     const characterName = getCurrentCharacterName();
     const source = inferRequestSource();
-    const modelName = extractModelName(body); /* 从请求体中提取模型名称 */
+    const modelName = getDisplayModelName(extractModelName(body)); /* 从请求体中提取模型名称 */
     /* 异步使用 ST 原生分词器精确计算每条消息的 token 数量 */
     /* 传入 modelName 用于与 ST 主 API 模型对比，判断分词器是否兼容 */
     await computeTokensForMessages(messages, modelName);
