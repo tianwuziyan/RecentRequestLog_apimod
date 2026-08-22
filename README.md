@@ -56,6 +56,10 @@ https://github.com/akira59851/RecentRequestLog
 
 ## 📅 更新日志
 
+### 修改api显示名称 - 2026-08-29
+**[新增]**
+- 把API名称进行正则清洗，比如aa\bb\cc 或者 [xx]aa\bb\cc,只留下cc
+
 ### [v1.5.0] - 2026-06-10
 
 **[新增]**
