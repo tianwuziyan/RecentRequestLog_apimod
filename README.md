@@ -21,7 +21,7 @@
 顶部菜单栏 `扩展程序` → `安装扩展程序` → 复制粘贴以下网址 → `给所有人安装` → 成功后刷新 SillyTavern 页面
 
 ```
-https://github.com/akira59851/RecentRequestLog
+https://github.com/tianwuziyan/RecentRequestLog_apimod
 ```
 
 ### 面板入口
