@@ -45,6 +45,20 @@
     /* 查找目标元素的失败重试计数（避免 DOM 尚未就绪时被跳过） */
     let findTargetRetryCount = 0;
 
+    /* ── 面板访问助手 ──────────────────────────────────────── */
+    /* 面板已挂进影子根（#rlog-shadow-host 的 open shadow root），document 整页查找不到，
+       统一从这里经 index.js 暴露的 __RLogApi 取面板节点 / 影子根内查询。 */
+    function getPanel() {
+        return window.__RLogApi && typeof window.__RLogApi.getPanelEl === 'function'
+            ? window.__RLogApi.getPanelEl()
+            : null;
+    }
+    function q(sel) {
+        return window.__RLogApi && typeof window.__RLogApi.q === 'function'
+            ? window.__RLogApi.q(sel)
+            : null;
+    }
+
     /* ── 引导步骤配置 ───────────────────────────────────────── */
     /* 每个步骤 = 目标元素 + 文案 + 可选项；需要行为（开抽屉/预览/搜索等）的步骤
        引用下方「步骤行为辅助函数」区里的具名函数，新增步骤时复制一个对象即可。 */
@@ -70,17 +84,17 @@
         },
         {
             targetSelector: '.rlog-header-actions',
-            desc: '• 更多选项<br>• 折叠所有条目<br>• 关闭面板'
+            desc: '• 更多选项<br>• 筛选记录<br>• 折叠所有条目<br>• 关闭面板'
         },
         {
             targetSelector: '#rlog-more-drawer',
-            desc: '点击<strong>更多选项</strong>显示：<br>• 内容预览开关<br>• 插件总开关<br>• 使用引导<br>• 临时测试按钮（后续移除）<br>• 清空所有记录<br>• 昼/夜模式切换',
+            desc: '点击<strong>更多选项</strong>显示：<br>• 插件总开关<br>• 使用引导<br>• 临时测试按钮（后续移除）<br>• 内容预览开关<br>• 清空所有记录<br>• 昼/夜模式切换',
             onEnter: enterDrawerStep,
             onLeave: leaveDrawerStep
         },
         {
             targetSelector: '#rlog-filter-drawer',
-            desc: '<strong>New </strong>点击<strong>筛选</strong>按钮显示：<br>• 原生/插件：按来源隐藏整条记录<br>• Gemini/Claude/DeepSeek/其他：按模型隐藏整条记录<br>• 系统/AI/用户/其他：按角色隐藏记录内的子消息<br>点击切换隐藏/显示，筛选条件可叠加',
+            desc: '点击<strong>筛选</strong>按钮显示：<br>• 原生/插件：按来源隐藏整条记录<br>• Gemini/Claude/DeepSeek/其他：按模型隐藏整条记录<br>• 系统/AI/用户/其他：按角色隐藏记录内的子消息<br>点击切换隐藏/显示，筛选条件可叠加',
             onEnter: enterFilterDrawerStep,
             onLeave: leaveFilterDrawerStep
         },
@@ -96,7 +110,7 @@
         },
         {
             targetSelector: '.rlog-record[data-record-index="0"] .rlog-record-actions-inner',
-            desc: '<strong>展开时显示：</strong><br>• 搜索<br>• 展开/折叠内部所有消息<br>• <strong>New 快速置底</strong><br>• <strong>New 查看全文</strong>（原<strong>复制整条请求</strong>移入内部）<br>• 删除本条记录'
+            desc: '<strong>展开时显示：</strong><br>• 搜索<br>• 展开/折叠内部所有消息<br>• <strong>快速置底</strong><br>• <strong>查看全文</strong>（原<strong>复制整条请求</strong>移入内部）<br>• 删除本条记录'
         },
         {
             targetSelector: '.rlog-search-box',
@@ -121,7 +135,7 @@
     /* 抽屉步骤：进入时打开「更多选项」抽屉、离开时关闭。
        通过临时禁用 transition + 强制回流，让抽屉瞬间到位，避免高亮框位置跳动。 */
     function setDrawerState(open) {
-        const drawer = document.getElementById('rlog-more-drawer');
+        const drawer = q('#rlog-more-drawer');
         if (drawer) drawer.style.transition = 'none';
         const api = window.__RLogApi;
         const action = api && (open ? api.openDrawer : api.closeDrawer);
@@ -145,7 +159,7 @@
     /* 筛选抽屉步骤：进入时打开「筛选」抽屉、离开时关闭。
        与抽屉步骤同理：临时禁用 transition，避免高亮框位置跳动。 */
     function setFilterDrawerState(open) {
-        const drawer = document.getElementById('rlog-filter-drawer');
+        const drawer = q('#rlog-filter-drawer');
         if (drawer) drawer.style.transition = 'none';
         const api = window.__RLogApi;
         if (api && typeof api.setFilterDrawer === 'function') {
@@ -193,7 +207,7 @@
             window.__RLogApi.openSearchForRecord(0);
         }
         /* 设置输入框内容（performSearch 只更新 searchState，不会写回 input.value） */
-        const searchBox = document.querySelector('#rlog-panel .rlog-search-box');
+        const searchBox = q('#rlog-panel .rlog-search-box');
         const inputEl = searchBox ? searchBox.querySelector('.rlog-search-input') : null;
         if (inputEl) {
             inputEl.value = '示例';
@@ -251,7 +265,7 @@
         if (isActive) return;
 
         /* 面板必须是可见的才能进行引导 */
-        const panel = document.getElementById('rlog-panel');
+        const panel = getPanel();
         if (!panel || panel.style.display === 'none') return;
 
         /* 如果处于折叠状态，先展开面板 */
@@ -419,7 +433,7 @@
         tooltip.className = 'rlog-tour-tooltip';
 
         /* 添加到面板内部，确保跟随面板移动 */
-        const panel = document.getElementById('rlog-panel');
+        const panel = getPanel();
         if (panel) {
             panel.appendChild(overlay);
             panel.appendChild(highlightBox);
@@ -487,7 +501,7 @@
 
     function showStep(index) {
         const step = steps[index];
-        const panel = document.getElementById('rlog-panel');
+        const panel = getPanel();
         const targetEl = panel ? panel.querySelector(step.targetSelector) : null;
 
         if (!targetEl) {
@@ -520,7 +534,7 @@
 
     /* ── 高亮与气泡定位 ─────────────────────────────────────── */
     function positionElements(targetEl, step) {
-        const panel = document.getElementById('rlog-panel');
+        const panel = getPanel();
         if (!panel) return;
 
         const placement = step.placement;

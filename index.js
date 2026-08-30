@@ -57,6 +57,41 @@ const STORAGE_MAX_RECORDS_KEY = `${PLUGIN_KEY}_maxRecords`;  /* 持久化最大�
 const STORAGE_PREVIEW_KEY = `${PLUGIN_KEY}_contentPreview`;  /* 持久化内容预览开关 */
 const NATIVE_INTENT_WINDOW_MS = 5000;
 
+/* 影子内 FA 固壳：仅插件实际使用的 28 个实心图标（content 取自 ST 现版 fontawesome.min.css 6.5.2，非猜测）
+   新增图标时在此补一行「图标名: '\\fXXX'」即可 */
+const FA_SOLID_CONTENT = {
+    'arrow-down': '\\f063',
+    'arrow-up': '\\f062',
+    'book': '\\f02d',
+    'check': '\\f00c',
+    'chevron-down': '\\f078',
+    'chevron-right': '\\f054',
+    'comment-dots': '\\f4ad',
+    'compress-alt': '\\f422',
+    'copy': '\\f0c5',
+    'ellipsis': '\\f141',
+    'eye': '\\f06e',
+    'eye-slash': '\\f070',
+    'expand': '\\f065',
+    'file-lines': '\\f15c',
+    'filter': '\\f0b0',
+    'gear': '\\f013',
+    'list': '\\f03a',
+    'magnifying-glass': '\\f002',
+    'moon': '\\f186',
+    'paper-plane': '\\f1d8',
+    'power-off': '\\f011',
+    'puzzle-piece': '\\f12e',
+    'question': '\\3f',
+    'rotate-left': '\\f2ea',
+    'sun': '\\f185',
+    'trash-can': '\\f2ed',
+    'user': '\\f007',
+    'vial': '\\f492',
+    'xmark': '\\f00d',
+    'caret-down': '\\f0d7',
+};
+
 /* number: 当前生效的最大记录数上限，从 localStorage 加载或使用默认值 */
 let MAX_RECORDS = DEFAULT_MAX_RECORDS;
 const AI_GENERATION_PATH_PATTERNS = [
@@ -142,6 +177,12 @@ let tourPendingRecords = [];
 
 /* HTMLElement|null: 面板 DOM 元素 */
 let panelEl = null;
+
+/* ShadowRoot|null: 插件面板的影子根（面板与样式放里面，隔离第三方主题 CSS） */
+let panelShadowRoot = null;
+
+/* HTMLElement|null: 影子宿主元素（挂在 body 上，承载影子根） */
+let shadowHostEl = null;
 
 /* HTMLElement|null: 扩展菜单中的按钮 */
 let toggleBtn = null;
@@ -1205,15 +1246,16 @@ function getReplyStatusMaxWidth() {
     probe.style.visibility = 'hidden';
     probe.style.display = 'inline-flex';
     probe.style.minWidth = '0px'; /* 覆盖类规则里的 var()，避免测量循环依赖 */
-    probe.style.pointerEvents = 'none';
-    probe.style.whiteSpace = 'nowrap';
-    let max = 0;
-    for (const status of ['succeed', 'fail', 'timeout']) {
-        probe.textContent = getReplyStatusLabel(status);
-        document.body.appendChild(probe);
-        max = Math.max(max, probe.offsetWidth);
-        probe.remove();
-    }
+        probe.style.pointerEvents = 'none';
+        probe.style.whiteSpace = 'nowrap';
+        let max = 0;
+        for (const status of ['succeed', 'fail', 'timeout']) {
+            probe.textContent = getReplyStatusLabel(status);
+            /* 挂到影子根内测量，样式与面板一致且不受第三方主题影响 */
+            if (panelShadowRoot) panelShadowRoot.appendChild(probe);
+            max = Math.max(max, probe.offsetWidth);
+            probe.remove();
+        }
     /* 仅在测出有效宽度时缓存：异常情况下 body 隐藏会量出 0，缓存 0 会让占位永久失效 */
     if (max > 0) replyStatusMaxWidth = max;
     return max;
@@ -1937,17 +1979,20 @@ function toggleContentPreview() {
 }
 
 /* 更新标题栏预览开关按钮的外观（开启/关闭状态）
-   开启时滑块右移变色，关闭时滑块左移恢复默认色 */
+   开启时图标为眼睛（fa-eye），关闭时图标为眼睛划掉（fa-eye-slash） */
 function updatePreviewToggleUI() {
-    const toggleEl = panelEl ? panelEl.querySelector('#rlog-preview-toggle') : null;
+    const toggleEl = panelEl ? panelEl.querySelector('#rlog-preview-btn') : null;
     if (!toggleEl) return;
+    const iconEl = toggleEl.querySelector('i');
     if (contentPreviewEnabled) {
         toggleEl.classList.add('rlog-preview-on');
         toggleEl.classList.remove('rlog-preview-off');
+        if (iconEl) iconEl.className = 'fa-solid fa-eye';
         toggleEl.title = '内容预览-已开启';
     } else {
         toggleEl.classList.remove('rlog-preview-on');
         toggleEl.classList.add('rlog-preview-off');
+        if (iconEl) iconEl.className = 'fa-solid fa-eye-slash';
         toggleEl.title = '内容预览-已关闭';
     }
 }
@@ -2091,7 +2136,8 @@ function showMaxRecordsDialog() {
     `;
 
     overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
+    /* 弹窗挂到影子根（而非 document.body）：同时被主题隔离，且避免挂到带 transform 的面板内破坏 fixed 参考系 */
+    if (panelShadowRoot) panelShadowRoot.appendChild(overlay);
     maxRecordsDialog = overlay;
 
     /* 绑定关闭按钮事件 */
@@ -2210,7 +2256,7 @@ function showConfirmDialog(options) {
     `;
 
     overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
+    if (panelShadowRoot) panelShadowRoot.appendChild(overlay);
     confirmDialogEl = overlay;
 
     /* 绑定关闭按钮事件 */
@@ -3822,7 +3868,7 @@ function switchReadFormat(format) {
     }
 
     /* 更新 toggle 状态 */
-    const toggleEl = readFullOverlayEl.querySelector('.rlog-read-format-toggle');
+    const toggleEl = readFullOverlayEl.querySelector('.rlog-read-format-btn');
     if (toggleEl) {
         if (format === 'raw') {
             toggleEl.classList.add('raw');
@@ -3896,11 +3942,7 @@ function openReadFullOverlay(index) {
         <div class="rlog-read-header">
             <span class="rlog-read-title">查看全文</span>
             <div class="rlog-read-header-actions">
-                <div class="rlog-read-format-toggle formatted" title="切换显示格式">
-                    <span class="rlog-read-seg-slider"></span>
-                    <span class="rlog-read-seg-option rlog-read-seg-formatted">整理</span>
-                    <span class="rlog-read-seg-option rlog-read-seg-raw">JSON</span>
-                </div>
+                <button class="rlog-read-format-btn formatted" title="切换显示格式" aria-label="切换显示格式">{}</button>
                 <button class="rlog-read-jump-top-btn" title="回顶">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="4" x2="19" y2="4"></line><line x1="12" y1="9" x2="12" y2="20"></line><polyline points="7 14 12 9 17 14"></polyline></svg>
                 </button>
@@ -3924,7 +3966,7 @@ function openReadFullOverlay(index) {
     contentEl.textContent = getReadContent(record, 'formatted');
 
     /* 绑定标题栏事件 */
-    const toggleEl = overlay.querySelector('.rlog-read-format-toggle');
+    const toggleEl = overlay.querySelector('.rlog-read-format-btn');
     toggleEl.addEventListener('click', (e) => {
         e.stopPropagation();
         /* 切换格式：当前 formatted → raw；raw → formatted */
@@ -4431,6 +4473,70 @@ function closeDrawerInstant(drawer, btn) {
     drawer.style.transition = '';
 }
 
+/* 定位本插件自身的 style.css 真实地址：优先用 ST 已注入的插件样式 <link>（id 形如 "<目录>-css"，
+   这里按插件目录名 RecentRequestLog 匹配），找不到时回退硬编码路径（与 loadTourScript 兜底一致）。
+   不用 import.meta：ST 以 ES Module 加载时 document.currentScript 为 null，且逻辑测试用 Node VM 载入本文件（非 module）。 */
+function getSelfCssUrl() {
+    try {
+        const link = [...document.querySelectorAll('link[rel="stylesheet"]')].find(l => l.id && l.id.endsWith('RecentRequestLog-css'));
+        if (link) return link.href;
+    } catch (e) { /* 无 document（如逻辑测试 VM 不执行到此）或异常，走兜底 */ }
+    return '/scripts/extensions/third-party/RecentRequestLog/style.css';
+}
+
+/* 影子内样式源（优先）：从 ST 已加载的本插件 style.css <link> 的样式表规则同步拷贝成影子内 <style>。
+   这样影子内样式立即生效，避免用 <link> 异步加载导致早期测量（如状态占位宽度探针）采不到 class 样式。 */
+function buildSelfCssElement() {
+    try {
+        const selfCssUrl = getSelfCssUrl();
+        const link = [...document.querySelectorAll('link[rel="stylesheet"]')].find(l => l.href === selfCssUrl);
+        if (link && link.sheet && link.sheet.cssRules && link.sheet.cssRules.length) {
+            const style = document.createElement('style');
+            style.textContent = [...link.sheet.cssRules].map(r => r.cssText).join('\n');
+            return style;
+        }
+    } catch (e) {
+        /* 跨域或样式表未就绪等：走下方 <link> 兜底 */
+    }
+    return buildSelfCssLink();
+}
+
+/* 影子内样式源（兜底）：直接引用本插件自身的 style.css 文件（浏览器缓存复用，不重复加载内容） */
+function buildSelfCssLink() {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.type = 'text/css';
+    link.href = getSelfCssUrl();
+    return link;
+}
+
+/* 影子内 FA 固壳：文档级 @font-face / .fa 规则进不了影子，这里在影子内补最小可用的一层。
+   - @font-face 复用 ST 现有 fa-solid-900 字体文件（绝对地址，不下载不复制）
+   - 只写插件实际使用的 30 个图标的 ::before content；新增图标在 FA_SOLID_CONTENT 补一行 */
+function buildFaShimStyle() {
+    const style = document.createElement('style');
+    /* 影子内复用 ST 现有 fa-solid-900 字体文件（绝对地址，不下载不复制）；在浏览器运行时换算一次 */
+    const faWoff2 = new URL('webfonts/fa-solid-900.woff2', location.href).href;
+    const faTtf = new URL('webfonts/fa-solid-900.ttf', location.href).href;
+    const rules = [
+        /* 影子内通用基准：ST 全局的 *{box-sizing:border-box;text-shadow:...} 等不进入影子，这里补上（去主题化）。
+           text-shadow 是可继承属性——ST 全局 * 会命中挂在 body 下的 shadow host，把主题算出的
+           text-shadow（某主题可把 --SmartThemeShadowColor/--shadowWidth 设成彩色辉光）经继承渗进影子，
+           必须在影子内重置为 none。其余则因 shadow 隔离丢了宿主全局基准，需一并补上，
+           否则元素默认 content-box、min-width/padding 计算会与旧版不一致（如状态占位槽位宽）。 */
+        '*,*::before,*::after{box-sizing:border-box;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;-webkit-tap-highlight-color:transparent;text-shadow:none}',
+        '@font-face{font-family:"Font Awesome 6 Free";font-style:normal;font-weight:900;font-display:block;'
+            + `src:url("${faWoff2}") format("woff2"),url("${faTtf}") format("truetype")}`,
+        '.fa,.fa-solid,.fas{font-family:"Font Awesome 6 Free";font-weight:900;font-style:normal;font-variant:normal;'
+            + 'line-height:1;text-rendering:auto;display:inline-block;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}',
+    ];
+    for (const [name, code] of Object.entries(FA_SOLID_CONTENT)) {
+        rules.push(`.fa-solid.fa-${name}:before{content:"${code}"}`);
+    }
+    style.textContent = rules.join('\n');
+    return style;
+}
+
 function buildUI() {
     if (uiBuilt) return;
     uiBuilt = true;
@@ -4465,16 +4571,14 @@ function buildUI() {
             <div class="rlog-header-drag-space" style="flex: 1; height: 28px; cursor: move; margin: 0 10px;"></div>
             <div class="rlog-header-actions">
                 <div class="rlog-more-drawer" id="rlog-more-drawer">
-                    <div class="rlog-preview-segmented" id="rlog-preview-toggle" title="内容预览开关">
-                        <span class="rlog-seg-slider"></span>
-                        <span class="rlog-seg-option rlog-seg-off">隐藏</span>
-                        <span class="rlog-seg-option rlog-seg-on">预览</span>
-                    </div>
                     <button id="rlog-master-toggle" class="rlog-header-btn rlog-master-on" title="总开关：已启用 — 点击关闭">
                         <i class="fa-solid fa-power-off"></i>
                     </button>
                     <button id="rlog-help-btn" class="rlog-header-btn" title="查看使用引导">
                         <i class="fa-solid fa-question"></i>
+                    </button>
+                    <button id="rlog-preview-btn" class="rlog-header-btn" title="内容预览-已关闭">
+                        <i class="fa-solid fa-eye-slash"></i>
                     </button>
                     <button id="rlog-clear-btn" class="rlog-header-btn" title="清空所有记录">
                         <i class="fa-solid fa-trash-can"></i>
@@ -4524,7 +4628,14 @@ function buildUI() {
 
     panelEl.classList.remove('rlog-window-collapsed');
 
-    document.body.appendChild(panelEl);
+    /* 影子 DOM 隔离：宿主 + 影子根，面板与其样式放进影子，从而不被第三方主题 CSS 覆盖 */
+    shadowHostEl = document.createElement('div');
+    shadowHostEl.id = 'rlog-shadow-host';
+    panelShadowRoot = shadowHostEl.attachShadow({ mode: 'open' });
+    panelShadowRoot.appendChild(buildSelfCssElement());
+    panelShadowRoot.appendChild(buildFaShimStyle());
+    panelShadowRoot.appendChild(panelEl);
+    document.body.appendChild(shadowHostEl);
 
     /* H4 标题文字拆分：文字部分单击折叠/展开，数字部分双击设置最大记录数 */
     {
@@ -4739,7 +4850,7 @@ function buildUI() {
     updatePreviewToggleUI();
 
     /* 绑定预览开关事件 */
-    const previewToggleEl = panelEl.querySelector('#rlog-preview-toggle');
+    const previewToggleEl = panelEl.querySelector('#rlog-preview-btn');
     if (previewToggleEl) {
         previewToggleEl.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -4931,7 +5042,7 @@ function makeDraggable(el) {
 
     header.addEventListener('mousedown', (e) => {
         /* 跳过按钮、H4 标题及其子元素、预览开关（它们有各自的交互，不参与拖拽） */
-        if (e.target.tagName === 'BUTTON' || e.target.closest('h4') || e.target.closest('#rlog-preview-toggle')) return;
+        if (e.target.tagName === 'BUTTON' || e.target.closest('h4') || e.target.closest('#rlog-preview-btn')) return;
         dragging = true;
         startX = e.clientX;
         startY = e.clientY;
@@ -4946,7 +5057,7 @@ function makeDraggable(el) {
     });
 
     header.addEventListener('touchstart', (e) => {
-        if (e.target.tagName === 'BUTTON' || e.target.closest('h4') || e.target.closest('#rlog-preview-toggle')) return;
+        if (e.target.tagName === 'BUTTON' || e.target.closest('h4') || e.target.closest('#rlog-preview-btn')) return;
         dragging = true;
         startX = e.touches[0].clientX;
         startY = e.touches[0].clientY;
@@ -5040,6 +5151,9 @@ init();
 
 window.__RLogApi = {
     records: () => records,
+    /* 面板/影子根访问（供 tour.js 使用）：面板已挂进影子根，document 查找不到，改从这里取 */
+    getPanelEl: () => panelEl,
+    q: (sel) => (panelShadowRoot ? panelShadowRoot.querySelector(sel) : null),
     /* 搜索相关（供 tour.js 使用） */
     openSearchForRecord: (recordIndex) => openSearchForRecord(recordIndex),
     performSearch: (recordIndex, keyword) => performSearch(recordIndex, keyword),
