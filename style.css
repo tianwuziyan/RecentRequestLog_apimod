@@ -109,12 +109,6 @@
     --rlog-copy-f-border: #ef4444;      /* 复制失败边框（亮暗相同） */
     --rlog-copy-f-bg: #fef2f2;          /* 复制失败背景 */
     --rlog-copy-f-text: #b91c1c;        /* 复制失败文字 */
-    /* 分段开关（内容预览） */
-    --rlog-preview-bg: #e5e7eb;         /* 开关容器背景 */
-    --rlog-preview-option: #6b7280;     /* 选项文字（未激活） */
-    --rlog-preview-active: #111827;     /* 选中项文字 */
-    --rlog-preview-inactive: #9ca3af;   /* 未选中项文字 */
-    --rlog-preview-slider: #ffffff;     /* 滑块背景 */
     /* 搜索 */
     --rlog-search-bg: rgba(0, 0, 0, 0.05);    /* 输入框容器背景 */
     --rlog-search-bg-hover: rgba(0, 0, 0, 0.08); /* 容器 hover/聚焦背景 */
@@ -158,11 +152,6 @@
     --rlog-read-header-bg: #f3f4f6;     /* 覆盖层标题栏背景 */
     --rlog-read-title: #111827;         /* 覆盖层标题文字 */
     --rlog-read-text: #374151;          /* 覆盖层内容文字 */
-    --rlog-read-toggle-bg: #e5e7eb;     /* 格式切换滑块容器背景 */
-    --rlog-read-option: #6b7280;        /* 格式选项文字（未激活） */
-    --rlog-read-active: #111827;        /* 格式选中项文字 */
-    --rlog-read-inactive: #9ca3af;      /* 格式未选中项文字 */
-    --rlog-read-slider: #ffffff;        /* 格式切换滑块背景 */
     --rlog-read-btn: #6b7280;           /* 覆盖层操作按钮图标 */
 }
 
@@ -227,11 +216,6 @@
     --rlog-copy-s-text: #1AC888;
     --rlog-copy-f-bg: rgba(239, 68, 68, 0.1);
     --rlog-copy-f-text: #f87171;
-    --rlog-preview-bg: #3f3f46;
-    --rlog-preview-option: #a1a1aa;
-    --rlog-preview-active: #f4f4f5;
-    --rlog-preview-inactive: #52525b;
-    --rlog-preview-slider: #52525b;
     --rlog-search-bg: rgba(255, 255, 255, 0.08);
     --rlog-search-bg-hover: rgba(255, 255, 255, 0.12);
     --rlog-search-text: #f4f4f5;
@@ -268,11 +252,6 @@
     --rlog-read-header-bg: #27272a;
     --rlog-read-title: #f4f4f5;
     --rlog-read-text: #e4e4e7;
-    --rlog-read-toggle-bg: #3f3f46;
-    --rlog-read-option: #a1a1aa;
-    --rlog-read-active: #f4f4f5;
-    --rlog-read-inactive: #52525b;
-    --rlog-read-slider: #52525b;
     --rlog-read-btn: #a1a1aa;
 }
 
@@ -295,7 +274,9 @@
     flex-direction: column;
     overflow: hidden;
     font-family: 'Segoe UI', system-ui, -apple-system, Roboto, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    font-weight: normal; /* 基准字重：影子内不从宿主（可能被第三方主题 body * 压成 600）继承，正文回 400，标题/计数等 600 由各自规则覆盖 */
     color: var(--rlog-text);
+    font-size: 13px; /* 基准字号：影子根不再从宿主继承 ST 的 --mainFontSize（受主题 font_scale 影响），空列表/次要文字以此为基准；标题、正文、计数等由各自规则覆盖 */
 }
 
 /* ── 面板头部 ─────────────────────────────────────── */
@@ -1460,60 +1441,6 @@ mark.rlog-search-mark-current {
     vertical-align: middle;
 }
 
-/* ── 标题栏预览开关（分段控制 Segmented Control） ────────── */
-.rlog-preview-segmented {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    background: var(--rlog-preview-bg);
-    border-radius: 4px;
-    padding: 2px;
-    cursor: pointer;
-    user-select: none;
-    flex-shrink: 0;
-    height: 24px;
-    box-sizing: border-box;
-}
-/* 分段选项文字 */
-.rlog-seg-option {
-    position: relative;
-    z-index: 1;
-    font-size: 11px;
-    font-weight: 600;
-    line-height: 1;
-    color: var(--rlog-preview-option);
-    padding: 0 8px;
-    height: 100%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    transition: color 0.2s ease;
-}
-/* 激活状态文字颜色 */
-.rlog-preview-on .rlog-seg-on { color: var(--rlog-preview-active); }
-.rlog-preview-on .rlog-seg-off { color: var(--rlog-preview-inactive); }
-
-.rlog-preview-off .rlog-seg-off { color: var(--rlog-preview-active); }
-.rlog-preview-off .rlog-seg-on { color: var(--rlog-preview-inactive); }
-
-/* 滑块背景 */
-.rlog-seg-slider {
-    position: absolute;
-    top: 2px;
-    bottom: 2px;
-    left: 2px;
-    width: calc(50% - 2px);
-    background: var(--rlog-preview-slider);
-    border-radius: 2px;
-    box-shadow: var(--rlog-shadow-sm);
-    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-/* 开启状态滑块移到右侧 */
-.rlog-preview-on .rlog-seg-slider {
-    transform: translateX(100%);
-}
-
 /* ── 总开关按钮 ────────────────────────────────
    按钮颜色由 index.js 内联样式直接设置（#4caf50 / #999），
    这里不再写 CSS 颜色，避免与内联样式冲突造成误解 */
@@ -1653,7 +1580,9 @@ mark.rlog-search-mark-current {
     max-width: 90vw;
     box-shadow: var(--rlog-dlg-shadow);
     font-family: 'Segoe UI', system-ui, -apple-system, Roboto, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    font-weight: normal; /* 与面板一致：弹窗也不再从宿主继承主题字重 */
     color: var(--rlog-dlg-text);
+    font-size: 13px; /* 与面板一致：弹窗也不再从宿主继承主题 font_scale 字号 */
     overflow: hidden;
 }
 
@@ -2094,7 +2023,7 @@ mark.rlog-search-mark-current {
     font-family: inherit;
 }
 
-/* ── 右侧操作区：格式切换滑块 + 复制 + 关闭 统一靠右排列 ── */
+/* ── 右侧操作区：格式切换按钮 + 回顶/置底/复制/关闭 统一靠右排列 ── */
 .rlog-read-header-actions {
     display: flex;
     align-items: center;
@@ -2102,69 +2031,38 @@ mark.rlog-search-mark-current {
     flex-shrink: 0;
 }
 
-/* ── 格式切换滑块（分段控制，参考内容预览开关） ── */
-/* 滑块与缩小后的按钮（20px）协调 */
-.rlog-read-format-toggle {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    background: var(--rlog-read-toggle-bg);
-    border-radius: 4px;
-    padding: 2px;
-    cursor: pointer;
-    user-select: none;
-    flex-shrink: 0;
-    height: 18px; /* 适配「查看全文」标题栏较矮高度（主标题栏为 24px） */
-    box-sizing: border-box;
-    font-size: 9px;
-    font-weight: 600;
-    white-space: nowrap; /* 防止选项文字折行 */
+/* ── 格式切换按钮（等宽字体花括号 {} 文本，替代 FA brackets-curly pro 图标） ──
+   与其它覆盖层按钮同尺寸（20×20），默认（整理格式）无特殊样式；
+   切换为原始格式（.raw）时图标显示重点色 + 持续 hover 底色（同「更多/筛选」抽屉展开态），让非默认格式一眼可辨。
+   用等宽字体写 {} 而不是 SVG：字体选 Consolas 系列（Windows 标配），与面板正文 Segoe UI 的图标风格搭配；
+   等宽字体最多只有 700 字重，调 900 也不会更粗，所以用 -webkit-text-stroke 给字形描边真正加粗 */
+.rlog-read-format-btn {
+    color: var(--rlog-read-btn);
+    font-family: Consolas, 'Cascadia Mono', ui-monospace, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace;
+    font-weight: 700;
+    -webkit-text-stroke: 0.4px currentColor; /* 等宽字体最多只到 700，调字重变不粗；用描边给 {} 字形真正加粗 */
+}
+.rlog-read-format-btn.raw {
+    color: var(--rlog-accent);
+    background: var(--rlog-hover-bg);
+}
+.rlog-read-format-btn:hover {
+    background: var(--rlog-hover-bg);
+}
+.rlog-read-format-btn:not(.raw):hover {
+    color: var(--rlog-text-strong);
+}
+.rlog-read-format-btn.raw:hover {
+    color: var(--rlog-accent-strong);
 }
 
-/* 两个选项等分宽度，文字始终在各自选项内居中；
-   white-space: nowrap 防止「JSON」等文字被挤压换行 */
-.rlog-read-seg-option {
-    position: relative;
-    z-index: 1;
-    flex: 1;
-    min-width: 0;
-    padding: 0 4px;       /* 更紧凑，适配较矮标题栏 */
-    height: 100%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
-    white-space: nowrap;
-    color: var(--rlog-read-option);
-    transition: color 0.2s ease;
-}
-.rlog-read-seg-slider {
-    position: absolute;
-    top: 2px;
-    bottom: 2px;
-    left: 2px;
-    width: calc(50% - 2px);
-    background: var(--rlog-read-slider);
-    border-radius: 2px;
-    box-shadow: var(--rlog-shadow-sm);
-    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-/* 整理格式：滑块在左，整理文字高亮 */
-.rlog-read-format-toggle.formatted .rlog-read-seg-formatted { color: var(--rlog-read-active); }
-.rlog-read-format-toggle.formatted .rlog-read-seg-raw { color: var(--rlog-read-inactive); }
-/* 原始格式：滑块移到右侧，原始JSON文字高亮 */
-.rlog-read-format-toggle.raw .rlog-read-seg-raw { color: var(--rlog-read-active); }
-.rlog-read-format-toggle.raw .rlog-read-seg-formatted { color: var(--rlog-read-inactive); }
-.rlog-read-format-toggle.raw .rlog-read-seg-slider {
-    transform: translateX(100%);
-}
-
-/* ── 回顶 / 置底 / 复制 / 关闭按钮 ─────────────
+/* ── 回顶 / 置底 / 复制 / 关闭 / 格式切换按钮 ─────────────
    比主标题栏按钮（28px）更小：20×20，适配较矮的「查看全文」标题栏 */
 .rlog-read-jump-top-btn,
 .rlog-read-jump-bottom-btn,
 .rlog-read-copy-btn,
-.rlog-read-close-btn {
+.rlog-read-close-btn,
+.rlog-read-format-btn {
     padding: 0;
     width: 20px;
     height: 20px;
@@ -2180,19 +2078,15 @@ mark.rlog-search-mark-current {
     transition: background 0.15s, color 0.15s;
     flex-shrink: 0;
 }
-/* 字号：跳转/复制按钮 11px，关闭按钮图标稍大 14px */
+/* 字号：跳转/复制/格式切换按钮 11px，关闭按钮图标稍大 14px */
 .rlog-read-jump-top-btn,
 .rlog-read-jump-bottom-btn,
-.rlog-read-copy-btn {
+.rlog-read-copy-btn,
+.rlog-read-format-btn {
     font-size: 11px;
 }
 .rlog-read-close-btn {
     font-size: 14px;
-}
-/* 滑块与按钮组形态不同（圆角分段控件 vs 方形图标按钮），
-   间距由紧挨滑块的「回顶」按钮承担；回顶↔置底↔复制↔关闭之间保持紧凑 gap */
-.rlog-read-jump-top-btn {
-    margin-left: 6px;
 }
 .rlog-read-jump-top-btn:hover,
 .rlog-read-jump-bottom-btn:hover,
@@ -2484,29 +2378,18 @@ mark.rlog-search-mark-current {
     .rlog-read-title {
         font-size: 12px;
     }
-    /* 移动端标题栏更矮，滑块进一步压缩 */
-    .rlog-read-format-toggle {
-        height: 16px;
-        font-size: 8px;
-    }
-    .rlog-read-seg-option {
-        padding: 0 3px;
-    }
     /* 移动端按钮再小一号：18×18 */
     .rlog-read-jump-top-btn,
     .rlog-read-jump-bottom-btn,
     .rlog-read-copy-btn,
-    .rlog-read-close-btn {
+    .rlog-read-close-btn,
+    .rlog-read-format-btn {
         width: 18px;
         height: 18px;
         font-size: 10px;
     }
     .rlog-read-close-btn {
         font-size: 12px;
-    }
-    /* 移动端滑块与按钮组间距同步缩小但保持视觉区分 */
-    .rlog-read-jump-top-btn {
-        margin-left: 5px;
     }
     .rlog-read-header-actions {
         gap: 3px;
