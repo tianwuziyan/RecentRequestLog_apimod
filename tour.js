@@ -88,7 +88,7 @@
         },
         {
             targetSelector: '#rlog-more-drawer',
-            desc: '点击<strong>更多选项</strong>显示：<br>• 插件总开关<br>• 使用引导<br>• 临时测试按钮（后续移除）<br>• 内容预览开关<br>• 清空所有记录<br>• 昼/夜模式切换',
+            desc: '点击<strong>更多选项</strong>显示：<br>• 插件总开关<br>• 使用引导<br>• 偏好设置<br>• 临时测试按钮（后续移除）<br>• 内容预览开关<br>• 清空所有记录<br>• 昼/夜模式切换',
             onEnter: enterDrawerStep,
             onLeave: leaveDrawerStep
         },
