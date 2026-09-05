@@ -12,7 +12,7 @@
    7. Fetch 请求拦截     网络层捕获请求体（parse/process/install，含同源 iframe 扩展）
    8. 回复追踪与解析     回复捕获/SSE 解析/错误提取/终态挂载
    9. 数据管理           记录增删、去重指纹、条数上限
-   10. 持久化设置        总开关/内容预览/主题/最大记录数读写
+   10. 持久化设置        总开关/内容预览/主题/最大记录数/偏好设置读写
    11. 通用弹窗          最大记录数设置 + 通用确认弹窗
    12. 搜索              搜索状态/匹配/高亮/导航
    13. 筛选              筛选状态/匹配/抽屉与分段按钮/指示器
@@ -21,8 +21,8 @@
    16. 记录删除与复制    单条删除、整条/单消息复制、复制反馈
    17. 查看全文覆盖层    覆盖层开合、格式切换、滚动、Esc 关闭
    18. 自定义滚动条      共享观察器、滚动条创建/更新/拖拽、滚动指示器
-   19. 面板控制          菜单入口、buildUI、开合/折叠/主题按钮
-   20. 拖拽与缩放        面板拖动/右下角缩放
+   19. 面板控制          菜单入口、buildUI、开合/折叠(↔浮标)/主题按钮
+   20. 拖拽与缩放        面板拖动/右下角缩放/浮标拖动
    21. 初始化            等待 ST 就绪并构建 UI
    22. 对外 API          window.__RLogApi 面向 tour.js 的接口
    23. 临时测试功能      烧瓶按钮与模拟注入（后续删除）
@@ -55,9 +55,19 @@ const STORAGE_THEME_KEY = `${PLUGIN_KEY}_theme`;
 const STORAGE_MASTER_KEY = `${PLUGIN_KEY}_masterEnabled`;
 const STORAGE_MAX_RECORDS_KEY = `${PLUGIN_KEY}_maxRecords`;  /* 持久化最大记录数 */
 const STORAGE_PREVIEW_KEY = `${PLUGIN_KEY}_contentPreview`;  /* 持久化内容预览开关 */
+const STORAGE_PREF_MOBILE_FULL = `${PLUGIN_KEY}_prefMobileFull`;      /* 偏好：移动端全屏（已实现：移动端打开面板自动铺满全屏） */
+const STORAGE_PREF_CLICK_OUTSIDE = `${PLUGIN_KEY}_prefClickOutside`;  /* 偏好：点击插件面板外关闭整个面板（已实现：双端点击面板外即关闭） */
+const STORAGE_PREF_FILTER_PERSIST = `${PLUGIN_KEY}_prefFilterPersist`; /* 偏好：筛选状态持久化（已实现：开启后跨页面保留筛选状态） */
+const STORAGE_PREF_MINIMAL = `${PLUGIN_KEY}_prefMinimal`;            /* 偏好：极简模式（已实现：开启后去掉过渡/动画/平滑滚动/闪烁/浮层虚化） */
+const STORAGE_PREF_BADGE_DEFAULT = `${PLUGIN_KEY}_prefBadgeDefault`; /* 偏好：浮标默认入口（已实现：开启后插件启动默认显示浮标，右上角默认位置） */
+const STORAGE_FILTER_STATE_KEY = `${PLUGIN_KEY}_filterState`;        /* 持久化的筛选状态对象（仅当「筛选状态持久化」偏好开启时读写） */
 const NATIVE_INTENT_WINDOW_MS = 5000;
+const BADGE_SIZE = 36;               /* 浮标边长(px)：桌面端 36×36（移动端在媒体查询里可缩到 32） */
+const BADGE_DRAG_THRESHOLD = 5;      /* 浮标拖动判定阈值(px)：位移超过该值视为拖动，否则视为点击恢复面板 */
+const BADGE_DEFAULT_MARGIN_RIGHT = 16; /* 浮标默认位置距视口右缘的距离(px)：「浮标默认入口」开启时启动默认位置 */
+const BADGE_DEFAULT_MARGIN_TOP = 12;  /* 浮标默认位置在 ST 顶部设置栏下缘往下的距离(px) */
 
-/* 影子内 FA 固壳：仅插件实际使用的 28 个实心图标（content 取自 ST 现版 fontawesome.min.css 6.5.2，非猜测）
+/* 影子内 FA 固壳：仅插件实际使用的 33 个实心图标（content 取自 ST 现版 fontawesome.min.css 6.5.2，非猜测）
    新增图标时在此补一行「图标名: '\\fXXX'」即可 */
 const FA_SOLID_CONTENT = {
     'arrow-down': '\\f063',
@@ -66,6 +76,7 @@ const FA_SOLID_CONTENT = {
     'check': '\\f00c',
     'chevron-down': '\\f078',
     'chevron-right': '\\f054',
+    'chevron-up': '\\f077',
     'comment-dots': '\\f4ad',
     'compress-alt': '\\f422',
     'copy': '\\f0c5',
@@ -76,6 +87,8 @@ const FA_SOLID_CONTENT = {
     'file-lines': '\\f15c',
     'filter': '\\f0b0',
     'gear': '\\f013',
+    'heart': '\\f004',
+    'heart-circle-check': '\\e4fd',
     'list': '\\f03a',
     'magnifying-glass': '\\f002',
     'moon': '\\f186',
@@ -184,6 +197,17 @@ let panelShadowRoot = null;
 /* HTMLElement|null: 影子宿主元素（挂在 body 上，承载影子根） */
 let shadowHostEl = null;
 
+/* HTMLElement|null: 浮标元素（收起面板后的小型插件入口，挂在影子根内、与面板平级） */
+let badgeEl = null;
+
+/* {left,top}|null: 浮标会话内位置（浮标左上角坐标）。
+   首次收起记录点击座标，拖动后更新，再次收起复用；页面刷新/重新初始化时随模块重载自动清空。 */
+let badgePos = null;
+
+/* boolean: 是否拦截「点击浮标恢复面板」后浏览器派发的原生 click（一次性标记）。
+   浮标隐藏、面板出现在同一坐标时，该 click 会 hit-test 到面板标题栏按钮，可能误开抽屉。 */
+let badgeSuppressNextClick = false;
+
 /* HTMLElement|null: 扩展菜单中的按钮 */
 let toggleBtn = null;
 
@@ -274,6 +298,22 @@ let contentPreviewEnabled = false;
 
 /* boolean|null: 强制覆盖内容预览开关（用于引导程序演示） */
 let forcePreviewState = null;
+
+/* @type {object} 偏好设置状态（5 项，默认全关；持久化到 localStorage）
+   五项偏好「浮标默认入口」「移动端全屏」「点击面板外关闭」「筛选状态持久化」「极简模式」均已接入实际行为。 */
+let preferences = {
+    badgeDefault: false,  /* boolean: 浮标默认入口（开启后插件启动默认显示浮标，右上角默认位置；关闭面板/最小化时浮标回到 badgePos） */
+    mobileFull: false,    /* boolean: 手机端全屏（移动端打开面板自动铺满全屏） */
+    clickOutside: false,  /* boolean: 点击插件面板外关闭整个面板（双端通用，全屏时自然不生效） */
+    filterPersist: false, /* boolean: 筛选状态持久化（开启后跨页面保留筛选状态；关闭时不改动当前筛选） */
+    minimal: false,       /* boolean: 极简模式（开启后去掉过渡/动画/平滑滚动/闪烁/浮层虚化，保留状态反馈与引导动效） */
+};
+
+/* HTMLElement|null: 偏好设置浮层（遮罩 + 面板）DOM 元素 */
+let prefOverlayEl = null;
+
+/* HTMLElement|null: 偏好设置「更多」抽屉入口按钮（用于切换心形图标态） */
+let prefBtnEl = null;
 
 /* @type {object|null} 当前搜索状态（同一时间仅一条记录可搜索）
    结构: { recordIndex, keyword, matches, currentIdx, searchEl }
@@ -1987,6 +2027,155 @@ function updatePreviewToggleUI() {
     }
 }
 
+/* ── 偏好设置（持久化 + 图标态；5 项行为已实现） ─────────────── */
+
+/* 偏好设置键 → localStorage 存储键 映射（与「可调参数」区同风格集中管理） */
+const PREF_STORAGE_KEYS = {
+    badgeDefault: STORAGE_PREF_BADGE_DEFAULT,
+    mobileFull: STORAGE_PREF_MOBILE_FULL,
+    clickOutside: STORAGE_PREF_CLICK_OUTSIDE,
+    filterPersist: STORAGE_PREF_FILTER_PERSIST,
+    minimal: STORAGE_PREF_MINIMAL,
+};
+
+/* 从 localStorage 加载全部偏好设置（默认全关；存储值 !== '1' 一律视为关） */
+function loadPreferences() {
+    for (const key of Object.keys(preferences)) {
+        try { preferences[key] = localStorage.getItem(PREF_STORAGE_KEYS[key]) === '1'; }
+        catch (e) { preferences[key] = false; }
+    }
+}
+
+/* 持久化单个偏好设置到 localStorage（与现有开关同一机制：'1'/'0'） */
+function savePreference(key, value) {
+    try { localStorage.setItem(PREF_STORAGE_KEYS[key], value ? '1' : '0'); } catch (e) { /* ignore */ }
+}
+
+/* 是否至少有一项偏好处于激活（用于切换「偏好设置」入口图标 fa-heart ↔ fa-heart-circle-check） */
+function hasActivePreference() {
+    return preferences.badgeDefault || preferences.mobileFull || preferences.clickOutside || preferences.filterPersist || preferences.minimal;
+}
+
+/* 更新「偏好设置」入口图标：
+   任意偏好激活 → fa-heart-circle-check；全部关闭 → fa-heart。
+   样式/间距与其他标题栏按钮一致，仅切换字形、不着色。 */
+function updatePrefButtonIcon() {
+    if (!prefBtnEl) return;
+    const iconEl = prefBtnEl.querySelector('i');
+    if (!iconEl) return;
+    if (hasActivePreference()) {
+        iconEl.className = 'fa-solid fa-heart-circle-check';
+    } else {
+        iconEl.className = 'fa-solid fa-heart';
+    }
+}
+
+/* 同步偏好浮层内所有 Toggle 的视觉状态（开/关 + role/aria-checked） */
+function syncPrefToggleUI() {
+    if (!prefOverlayEl) return;
+    const toggles = prefOverlayEl.querySelectorAll('.rlog-toggle');
+    toggles.forEach((toggle) => {
+        const key = toggle.getAttribute('data-pref-key');
+        const on = key ? !!preferences[key] : false;
+        toggle.classList.toggle('rlog-toggle-on', on);
+        toggle.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+}
+
+/* 设置某个偏好：更新状态 + 持久化 + 刷新图标态与开关视觉。
+   五项偏好均已接入实际行为（见下方各 key 处理）。 */
+function setPreference(key, value) {
+    if (!(key in preferences)) return;
+    preferences[key] = !!value;
+    savePreference(key, preferences[key]);
+    updatePrefButtonIcon();
+    syncPrefToggleUI();
+    /* 「移动端全屏」：切换后立即应用/撤销全屏（仅移动端视口生效）。
+       「点击面板外关闭」无需即时动作：全局点击监听在点击时读取该标志即可生效。
+       「筛选状态持久化」：开启时用当前内存态立即落盘（避免读到陈旧值）；关闭时不改动当前筛选。
+       「极简模式」：切换后立即给影子宿主加/去类，关掉全部动效。
+       「浮标默认入口」：开启且面板隐藏时立即显示浮标（按默认位置定位）；关闭时若浮标并非因「折叠」
+       而显示则隐藏（否则保留折叠态浮标），避免 API 直接改设置留下残留。 */
+    if (key === 'mobileFull') updateMobileFullscreenClass();
+    if (key === 'filterPersist' && preferences.filterPersist) saveFilterState();
+    if (key === 'minimal') updateMinimalClass();
+    if (key === 'badgeDefault') setPreferenceBadgeDefaultBehavior();
+}
+
+/* 应用「浮标默认入口」偏好切换后的即时行为（开启/关闭的边界处理）。
+   - 开启：面板隐藏时立即显示浮标（badgePos 为空则用右上默认位置）。
+   - 关闭：若浮标当前是因「折叠」显示（isPanelCollapsed）则保留；否则隐藏。 */
+function setPreferenceBadgeDefaultBehavior() {
+    if (!badgeEl) return;
+    if (preferences.badgeDefault) {
+        if (!isPanelVisible) {
+            if (!badgePos) badgePos = getDefaultBadgePos();
+            else badgePos = clampBadgeToViewport(badgePos.left, badgePos.top);
+            badgeEl.style.left = badgePos.left + 'px';
+            badgeEl.style.top = badgePos.top + 'px';
+            setBadgeActive(true);
+        }
+    } else {
+        if (!isPanelCollapsed) setBadgeActive(false);
+    }
+}
+
+/* 判断「移动端全屏」当前是否应生效：偏好开启 + 移动端视口（唯一断点 768px）。
+   桌面端因断点隔离，该项始终不生效，不影响其它逻辑。 */
+function isMobileFullActive() {
+    return preferences.mobileFull && window.matchMedia('(max-width: 768px)').matches;
+}
+
+/* 应用/撤销「移动端全屏」：给面板加/去 .rlog-mobile-fullscreen 类，样式由 CSS 移动端适配区负责。
+   切换偏好、打开面板、初始化时各调用一次，保证面板窗口位置/尺寸始终与偏好一致。 */
+function updateMobileFullscreenClass() {
+    if (!panelEl) return;
+    panelEl.classList.toggle('rlog-mobile-fullscreen', isMobileFullActive());
+}
+
+/* 应用/撤销「极简模式」：把 .rlog-minimal 类加到影子宿主（而非面板）上，
+   配合影子内 `:host(.rlog-minimal)` 样式一次性关掉全部过渡/动画（含与面板平级的弹窗）。
+   切换偏好、初始化时各调用一次。 */
+function updateMinimalClass() {
+    if (!shadowHostEl) return;
+    shadowHostEl.classList.toggle('rlog-minimal', !!preferences.minimal);
+}
+
+/* 打开偏好设置浮层：
+   先收起「更多」抽屉，再显示遮罩浮层（设置面板居中显示）。 */
+function openPrefPanel() {
+    if (!prefOverlayEl) return;
+    closeMoreDrawer();
+    syncPrefToggleUI();
+    prefOverlayEl.classList.add('rlog-pref-open');
+    /* 等一帧让遮罩显示、测量完成，再更新滚动提示箭头 */
+    requestAnimationFrame(() => updatePrefScrollArrows());
+}
+
+/* 关闭偏好设置浮层（唯一关闭方式是右上角 ×，由 buildUI 内的事件绑定触发）。
+   注意：遮罩点击不触发关闭、也不做任何其他动作；「点击面板外关闭」偏好针对的是
+   关闭整个插件主面板（点整个插件面板外部），与浮层的关闭方式无关，该偏好行为已实现。 */
+function closePrefPanel() {
+    if (!prefOverlayEl) return;
+    prefOverlayEl.classList.remove('rlog-pref-open');
+}
+
+/* 更新偏好设置列表的滚动提示箭头：
+   仅在内容真的需要滚动时显示对应方向的箭头（向上有内容→下箭头提示仍可滚动范围），
+   到底/到顶/无需滚动时隐藏；箭头只作状态提示，不参与交互。
+   依赖 buildUI 内绑定的 .rlog-pref-list scroll 事件与 openPrefPanel 里的首帧更新。 */
+function updatePrefScrollArrows() {
+    if (!prefOverlayEl) return;
+    const list = prefOverlayEl.querySelector('.rlog-pref-list');
+    const up = prefOverlayEl.querySelector('.rlog-pref-scroll-up');
+    const down = prefOverlayEl.querySelector('.rlog-pref-scroll-down');
+    if (!list || !up || !down) return;
+    const canUp = list.scrollTop > 1;
+    const canDown = list.scrollTop + list.clientHeight < list.scrollHeight - 1;
+    up.classList.toggle('rlog-pref-arrow-visible', canUp);
+    down.classList.toggle('rlog-pref-arrow-visible', canDown);
+}
+
 function loadTheme() {
     try { return localStorage.getItem(STORAGE_THEME_KEY) === 'light'; } catch (e) { return false; }
 }
@@ -2001,6 +2190,12 @@ function applyTheme() {
         panelEl.classList.add('rlog-light');
     } else {
         panelEl.classList.remove('rlog-light');
+    }
+    /* 主题类同步到影子宿主：浮标的主题色变量挂 #rlog-shadow-host（宿主自定义属性跨影子边界
+       继承给浮标），亮色时给宿主加 .rlog-light 使浮标切到亮色配色。 */
+    if (shadowHostEl) {
+        if (isLightTheme) shadowHostEl.classList.add('rlog-light');
+        else shadowHostEl.classList.remove('rlog-light');
     }
 }
 
@@ -2604,6 +2799,12 @@ function highlightAllMatches(recordEl, recordIndex) {
    在移动端会连带滚动 ST 主界面（body/#sheld 等），造成整个界面位移。
    @param {HTMLElement} markEl 当前高亮的 <mark> 元素
    @param {HTMLElement} contentEl 所在 .rmsg-content 元素 */
+/* 返回当前应使用的滚动行为：极简模式用 'auto' 直接跳转，否则 'smooth' 平滑。
+   极简定位逻辑不变（位置计算/夹取照旧），只把滚动方式由平滑改成瞬时。 */
+function getScrollBehavior() {
+    return preferences.minimal ? 'auto' : 'smooth';
+}
+
 function scrollToMatch(markEl, contentEl) {
     if (!markEl || !contentEl) return;
 
@@ -2618,7 +2819,7 @@ function scrollToMatch(markEl, contentEl) {
     /* 目标位置：距消息内容区顶部约 25% 高度处（视觉舒适区） */
     const targetScroll = relativeTop - contentRect.height * 0.25;
     const clampedContentScroll = Math.max(0, targetScroll);
-    contentEl.scrollTo({ top: clampedContentScroll, behavior: 'smooth' });
+    contentEl.scrollTo({ top: clampedContentScroll, behavior: getScrollBehavior() });
 
     /* 2. 外层列表滚动：手动定位，避免 scrollIntoView 联动滚动 ST 主界面 */
     /* 内层平滑滚动尚未完成，但 mark 在 list 中的逻辑位置可由滚动增量推算： */
@@ -2661,7 +2862,7 @@ function scrollToMatch(markEl, contentEl) {
 
     /* 仅在需要调整时滚动外层（mark 已可见时保持不动，避免触发任何外部滚动） */
     if (Math.abs(clampedListScroll - listEl.scrollTop) > 1) {
-        listEl.scrollTo({ top: clampedListScroll, behavior: 'smooth' });
+        listEl.scrollTo({ top: clampedListScroll, behavior: getScrollBehavior() });
     }
 }
 
@@ -3010,6 +3211,42 @@ function createDefaultFilterState() {
     };
 }
 
+/* 把当前筛选状态持久化到 localStorage（仅当「筛选状态持久化」开关开启时调用）。
+   存整个 filterState 对象（source/role/model 三组布尔），刷新/重开页面后据此恢复。 */
+function saveFilterState() {
+    try { localStorage.setItem(STORAGE_FILTER_STATE_KEY, JSON.stringify(filterState)); } catch (e) { /* 忽略异常 */ }
+}
+
+/* 清洗从 localStorage 读回的筛选状态：
+   以默认全开为基准，逐分组逐键只采纳布尔值，未知/缺失/非法一律回退 true，防止脏数据。 */
+function sanitizeFilterState(state) {
+    const def = createDefaultFilterState();
+    if (!state || typeof state !== 'object') return def;
+    const out = createDefaultFilterState();
+    for (const group of Object.keys(def)) {
+        if (state[group] && typeof state[group] === 'object') {
+            for (const key of Object.keys(def[group])) {
+                if (typeof state[group][key] === 'boolean') out[group][key] = state[group][key];
+            }
+        }
+    }
+    return out;
+}
+
+/* 加载持久化的筛选状态并覆盖当前 filterState。
+   仅当「筛选状态持久化」开关开启时读取；无值/解析失败/数据非法一律回退默认全开。
+   开关关闭时不读取，保持原有的会话级逻辑（刷新即重置为全开）。 */
+function loadPersistedFilterState() {
+    if (!preferences.filterPersist) return;
+    try {
+        const raw = localStorage.getItem(STORAGE_FILTER_STATE_KEY);
+        if (raw === null) return;
+        filterState = sanitizeFilterState(JSON.parse(raw));
+    } catch (e) { /* 解析失败：回退默认全开 */
+        filterState = createDefaultFilterState();
+    }
+}
+
 /* 模型品牌图标 SVG 路径（simple-icons 单色 24×24，fill="currentColor"，内联无图片文件） */
 const FILTER_MODEL_SVG = {
     gemini_full: `<svg viewBox="0 0 24 24" width="100%" height="100%" aria-hidden="true">
@@ -3083,15 +3320,20 @@ function toggleFilterChip(group, value) {
     filterState[group][value] = !filterState[group][value];
     updateFilterChipUI();
     panelContentDirty = true;
+    /* 「筛选状态持久化」开启时，每次切换立即落盘，刷新/重开页面后据此恢复 */
+    if (preferences.filterPersist) saveFilterState();
     if (panelEl && isPanelVisible) renderPanelContent();
 }
 
-/* 重置全部筛选为「全开」并刷新列表 */
-function resetFilters() {
+/* 重置全部筛选为「全开」并刷新列表
+   @param {boolean} [persist=true] 是否在重置后落盘（用户手动重置=真；引导等程序化调用传 false，
+      避免引导在开始时把用户已持久化的筛选覆盖成全开） */
+function resetFilters(persist = true) {
     filterState = createDefaultFilterState();
     updateFilterChipUI();
     updateFilterIndicator();
     panelContentDirty = true;
+    if (persist && preferences.filterPersist) saveFilterState();
     if (panelEl && isPanelVisible) renderPanelContent();
 }
 
@@ -3661,7 +3903,7 @@ function scrollToRecordBottom(index) {
         /* 避免「按钮刚点完动画已结束」：条目多/展开状态下跳转距离长时尤其明显 */
         cancelPendingFlash();
         pendingFlashHeader = headerEl;
-        listEl.scrollTo({ top: clampedListScroll, behavior: 'smooth' });
+        listEl.scrollTo({ top: clampedListScroll, behavior: getScrollBehavior() });
         let settled = false;
         const onScrollEnd = () => {
             if (settled) return;
@@ -3742,6 +3984,9 @@ function flashTopHint() {
    @param {HTMLElement} headerEl 目标 .rmsg-header 元素 */
 function triggerHeaderFlash(headerEl) {
     if (!headerEl) return;
+    /* 极简模式：不做标题栏底色闪烁（仅保留滚动定位），同时避免 animation:none 下
+       animationend 不触发导致 .rlog-flash-bottom 类残留。 */
+    if (preferences.minimal) return;
     headerEl.classList.remove('rlog-flash-bottom');
     void headerEl.offsetWidth; /* 强制回流，确保重复点击可重播动画 */
     headerEl.classList.add('rlog-flash-bottom');
@@ -3880,7 +4125,7 @@ function scrollReadContentTo(position) {
     /* 平滑滚动到顶部/底部；置底目标赋 scrollHeight，浏览器会自动 clamp 到最大可滚动位置 */
     contentEl.scrollTo({
         top: position === 'bottom' ? contentEl.scrollHeight : 0,
-        behavior: 'smooth',
+        behavior: getScrollBehavior(),
     });
 }
 
@@ -4373,37 +4618,102 @@ function attachScrollIndicators(listEl) {
 
 /* ── 面板控制 ─────────────────────────── */
 
-function togglePanelWindow() {
+/* 浮标实际边长：桌面 36×36，移动端（≤768px）32×32（与 style.css 末尾媒体查询一致） */
+function getBadgeSize() {
+    return window.matchMedia('(max-width: 768px)').matches ? 32 : BADGE_SIZE;
+}
+
+/* 浮标在视口内的合法位置：入参为浮标左上角坐标，clamp 到视口内（保证浮标完全可见）。
+   top 下限取 ST 顶部设置栏实际高度：浮标层级低于顶部设置栏，若进入该高度会被它遮住点不到，
+   故禁止浮标进入顶部栏区域，确保任何位置都可见可点。 */
+function clampBadgeToViewport(left, top) {
+    const size = getBadgeSize();
+    const topBarEl = document.getElementById('top-settings-holder');
+    const minTop = topBarEl ? Math.ceil(topBarEl.getBoundingClientRect().height) : 0;
+    const maxLeft = Math.max(0, window.innerWidth - size);
+    const maxTop = Math.max(minTop, window.innerHeight - size);
+    return {
+        left: Math.min(Math.max(0, left), maxLeft),
+        top: Math.min(Math.max(minTop, top), maxTop),
+    };
+}
+
+/* 「浮标默认入口」开启时，浮标在右上角的默认位置：
+   距右缘 BADGE_DEFAULT_MARGIN_RIGHT、在 ST 顶部设置栏下缘再往 BADGE_DEFAULT_MARGIN_TOP 处，
+   最后经 clampBadgeToViewport 兜底（保证不进顶栏、不出视口）。
+   仅用于启动/关闭面板后 badgePos 为空（或需重置）时的初始落位；拖动后 badgePos 接管。 */
+function getDefaultBadgePos() {
+    const size = getBadgeSize();
+    const topBarEl = document.getElementById('top-settings-holder');
+    const minTop = topBarEl ? Math.ceil(topBarEl.getBoundingClientRect().height) : 0;
+    return clampBadgeToViewport(
+        window.innerWidth - size - BADGE_DEFAULT_MARGIN_RIGHT,
+        minTop + BADGE_DEFAULT_MARGIN_TOP
+    );
+}
+
+/* 重置面板为默认定位/尺寸：清掉此前拖拽/缩放写入的 inline 样式，让 CSS 默认值生效
+   （默认：top:80px + left:50% + translateX(-50%) + 宽高/上下限走 style.css 基准）。
+   不额外做边界修正：默认定位本就居中/贴边、在视口内（水平由 95vw 上限保证，
+   垂直仅极端小视口底部略超，与刷新后初始布局一致），无需防跑出界面。 */
+function resetPanelToDefault() {
+    if (!panelEl) return;
+    panelEl.style.left = '';
+    panelEl.style.top = '';
+    panelEl.style.right = '';
+    panelEl.style.bottom = '';
+    panelEl.style.transform = '';
+    panelEl.style.width = '';
+    panelEl.style.height = '';
+    panelEl.style.minHeight = '';
+    panelEl.style.maxHeight = '';
+    panelEl.style.transition = '';
+}
+
+/* 切换浮标显隐：浮标仅在「收起面板」态显示（.rlog-badge-active），其余时间隐藏 */
+function setBadgeActive(active) {
+    if (!badgeEl) return;
+    if (active) badgeEl.classList.add('rlog-badge-active');
+    else badgeEl.classList.remove('rlog-badge-active');
+}
+
+/* 标题文字点击触发的「面板 ↔ 浮标」切换。
+   @param {MouseEvent} [ev] 点击事件（用于以点击坐标作为浮标中心；首次收起且无事件时居中兜底） */
+function togglePanelWindow(ev) {
     isPanelCollapsed = !isPanelCollapsed;
     if (isPanelCollapsed) {
-        const rect = panelEl.getBoundingClientRect();
-        panelEl.dataset.rlogSavedWidth = rect.width;
-        panelEl.dataset.rlogSavedHeight = rect.height;
+        /* 收起为浮标：会话内首次收起以当次点击标题文字的坐标作为浮标中心并记录；
+           会话内再次收起复用记录的位置（拖动过后即为拖动后位置）。
+           展开/拖动标题栏不影响记录值；刷新/重新初始化后 badgePos 重置为 null，按首次收起处理。 */
         panelEl.classList.add('rlog-window-collapsed');
-        panelEl.style.width = rect.width + 'px';
-        panelEl.style.height = 'auto';
-        panelEl.style.minHeight = '0';
-        panelEl.style.maxHeight = 'none';
+        panelEl.style.display = 'none';
+        if (badgeEl) {
+            if (!badgePos) {
+                const size = getBadgeSize();
+                const cx = ev ? ev.clientX : window.innerWidth / 2;
+                const cy = ev ? ev.clientY : window.innerHeight / 2;
+                badgePos = clampBadgeToViewport(cx - size / 2, cy - size / 2);
+            } else {
+                /* 复用记录位置，并在当前视口/尺寸下 clamp（窗口缩小或断点切换后仍保证可见） */
+                badgePos = clampBadgeToViewport(badgePos.left, badgePos.top);
+            }
+            badgeEl.style.left = badgePos.left + 'px';
+            badgeEl.style.top = badgePos.top + 'px';
+        }
+        setBadgeActive(true);
     } else {
-        const savedW = panelEl.dataset.rlogSavedWidth;
-        if (savedW) panelEl.style.width = savedW + 'px';
-        /* 恢复时使用 auto 高度，让内容驱动窗口高度（受 CSS min-height / max-height 约束）， */
-        /* 否则固定像素高度会阻止记录增多时的窗口自动扩展 */
-        panelEl.style.height = 'auto';
-        panelEl.style.minHeight = '';
-        panelEl.style.maxHeight = '80vh';
-        delete panelEl.dataset.rlogSavedWidth;
-        delete panelEl.dataset.rlogSavedHeight;
+        /* 恢复面板：隐藏浮标，把面板重置为默认定位/尺寸后重新显示 */
+        setBadgeActive(false);
         panelEl.classList.remove('rlog-window-collapsed');
+        panelEl.style.display = 'flex';
+        resetPanelToDefault();
         /* 窗口重新展开后重测记录标题栏高度（隐藏期间 offsetHeight 为 0，吸顶偏移需刷新） */
         syncRecordHeaderVars(panelEl.querySelector('#rlog-list'));
         /* 折叠期间有新记录到达时，恢复展开后回到列表顶部最新一条 */
-        /* （DOM 在隐藏状态下重建，浏览器重新显示时会恢复旧滚动位置，必须显式回顶） */
         if (pendingScrollToTop) {
             pendingScrollToTop = false;
             const listEl = panelEl.querySelector('#rlog-list');
             if (listEl) listEl.scrollTop = 0;
-            /* 窗口折叠期间来新消息，展开回顶后提示最新一条位置 */
             flashTopHint();
         }
     }
@@ -4502,7 +4812,7 @@ function buildSelfCssLink() {
 
 /* 影子内 FA 固壳：文档级 @font-face / .fa 规则进不了影子，这里在影子内补最小可用的一层。
    - @font-face 复用 ST 现有 fa-solid-900 字体文件（绝对地址，不下载不复制）
-   - 只写插件实际使用的 30 个图标的 ::before content；新增图标在 FA_SOLID_CONTENT 补一行 */
+   - 只写插件实际使用的 33 个图标的 ::before content；新增图标在 FA_SOLID_CONTENT 补一行 */
 function buildFaShimStyle() {
     const style = document.createElement('style');
     /* 影子内复用 ST 现有 fa-solid-900 字体文件（绝对地址，不下载不复制）；在浏览器运行时换算一次 */
@@ -4523,6 +4833,31 @@ function buildFaShimStyle() {
     for (const [name, code] of Object.entries(FA_SOLID_CONTENT)) {
         rules.push(`.fa-solid.fa-${name}:before{content:"${code}"}`);
     }
+    style.textContent = rules.join('\n');
+    return style;
+}
+
+/* 影子内「极简模式」样式：通过 :host(.rlog-minimal) 一次性关闭面板/弹窗的全部过渡与动画。
+   用 :host 而不是 #rlog-panel 前缀，是因为设置上限/确认弹窗挂在 panelShadowRoot、
+   与 #rlog-panel 平级（不在面板内），只有 :host 能同时兜住面板与弹窗。
+   要点：
+   - 去掉全部 transition/animation（hover 渐变、抽屉滑出、箭头旋转、token 脉冲、
+     搜索框展开、主题呼吸、弹窗淡入、滚动条淡入淡出等），保留瞬时状态反馈；
+   - 去掉偏好浮层 1px 虚化（遮罩本身与半透明背景保留）；
+   - 显式豁免使用引导（.rlog-tour-*）：引导气泡淡入与小三角 left 平滑跟随照旧，
+     不受极简模式影响。此类规则不能写进外部 style.css（文档里的 :host 会被丢弃且拷不进影子），
+     只能在 JS 运行时注入影子。 */
+function buildMinimalShimStyle() {
+    const style = document.createElement('style');
+    const rules = [
+        ':host(.rlog-minimal){transition:none!important;animation:none!important}',
+        ':host(.rlog-minimal) *,:host(.rlog-minimal) *::before,:host(.rlog-minimal) *::after{transition:none!important;animation:none!important}',
+        ':host(.rlog-minimal) .rlog-pref-overlay{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}',
+        ':host(.rlog-minimal) .rlog-tour-highlight::before,:host(.rlog-minimal) .rlog-tour-highlight::after{transition:none!important;animation:none!important}',
+        ':host(.rlog-minimal) .rlog-tour-highlight{transition:all .3s cubic-bezier(.4,0,.2,1)!important;animation:none!important}',
+        ':host(.rlog-minimal) .rlog-tour-tooltip::before,:host(.rlog-minimal) .rlog-tour-tooltip::after{transition:left .3s cubic-bezier(.4,0,.2,1)!important;animation:none!important}',
+        ':host(.rlog-minimal) .rlog-tour-tooltip{transition:all .3s cubic-bezier(.4,0,.2,1)!important;animation:rlog-dialog-fadein .3s ease-out!important}',
+    ];
     style.textContent = rules.join('\n');
     return style;
 }
@@ -4566,6 +4901,9 @@ function buildUI() {
                     </button>
                     <button id="rlog-help-btn" class="rlog-header-btn" title="查看使用引导">
                         <i class="fa-solid fa-question"></i>
+                    </button>
+                    <button id="rlog-pref-btn" class="rlog-header-btn" title="偏好设置">
+                        <i class="fa-solid fa-heart"></i>
                     </button>
                     <button id="rlog-preview-btn" class="rlog-header-btn" title="内容预览-已关闭">
                         <i class="fa-solid fa-eye-slash"></i>
@@ -4614,6 +4952,59 @@ function buildUI() {
             </div>
             <div class="rlog-resize-grip" title="拖动调整窗口大小"></div>
         </div>
+        <div class="rlog-pref-overlay" id="rlog-pref-overlay">
+            <div class="rlog-pref-panel">
+                <div class="rlog-pref-header">
+                    <div class="rlog-pref-header-text">
+                        <span class="rlog-pref-title">偏好设置</span>
+                        <div class="rlog-pref-sub">一些针对特定偏好的持久化设置</div>
+                    </div>
+                    <button class="rlog-pref-close" title="关闭"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="rlog-pref-divider"></div>
+                <div class="rlog-pref-list-wrap">
+                    <i class="rlog-pref-scroll rlog-pref-scroll-up fa-solid fa-chevron-up"></i>
+                    <div class="rlog-pref-list">
+                        <div class="rlog-pref-item">
+                            <div class="rlog-pref-item-text">
+                                <span class="rlog-pref-label">浮标作为默认入口</span>
+                                <div class="rlog-pref-item-desc">开启后，插件启动默认显示浮标<br>否则仅最小化时出现浮标</div>
+                            </div>
+                            <button class="rlog-toggle" data-pref-key="badgeDefault" role="switch" aria-checked="false" aria-label="浮标默认入口"></button>
+                        </div>
+                        <div class="rlog-pref-item">
+                            <div class="rlog-pref-item-text">
+                                <span class="rlog-pref-label">移动端默认全屏</span>
+                                <div class="rlog-pref-item-desc">阅读区域最大化，覆盖下一项设置<br>因为没有面板外区域了</div>
+                            </div>
+                            <button class="rlog-toggle" data-pref-key="mobileFull" role="switch" aria-checked="false" aria-label="移动端全屏"></button>
+                        </div>
+                        <div class="rlog-pref-item">
+                            <div class="rlog-pref-item-text">
+                                <span class="rlog-pref-label">点击面板外关闭</span>
+                                <div class="rlog-pref-item-desc">不用跟 x 较劲了，点哪都能关</div>
+                            </div>
+                            <button class="rlog-toggle" data-pref-key="clickOutside" role="switch" aria-checked="false" aria-label="点击面板外关闭"></button>
+                        </div>
+                        <div class="rlog-pref-item">
+                            <div class="rlog-pref-item-text">
+                                <span class="rlog-pref-label">筛选状态持久化</span>
+                                <div class="rlog-pref-item-desc">筛选项不再自动重置<br>开启后找不着内容记得先重置筛选</div>
+                            </div>
+                            <button class="rlog-toggle" data-pref-key="filterPersist" role="switch" aria-checked="false" aria-label="筛选状态持久化"></button>
+                        </div>
+                        <div class="rlog-pref-item">
+                            <div class="rlog-pref-item-text">
+                                <span class="rlog-pref-label">极简模式</span>
+                                <div class="rlog-pref-item-desc">去掉所有平滑滚动、悬浮、闪烁提示<br>等视觉效果，非常直来直去</div>
+                            </div>
+                            <button class="rlog-toggle" data-pref-key="minimal" role="switch" aria-checked="false" aria-label="极简模式"></button>
+                        </div>
+                    </div>
+                    <i class="rlog-pref-scroll rlog-pref-scroll-down fa-solid fa-chevron-down"></i>
+                </div>
+            </div>
+        </div>
     `;
 
     panelEl.classList.remove('rlog-window-collapsed');
@@ -4624,8 +5015,21 @@ function buildUI() {
     panelShadowRoot = shadowHostEl.attachShadow({ mode: 'open' });
     panelShadowRoot.appendChild(buildSelfCssElement());
     panelShadowRoot.appendChild(buildFaShimStyle());
+    panelShadowRoot.appendChild(buildMinimalShimStyle());
     panelShadowRoot.appendChild(panelEl);
     document.body.appendChild(shadowHostEl);
+
+    /* 浮标：收起面板后的小型插件入口（与 #rlog-panel 平级，放在影子根内），默认隐藏。
+       复用插件列表里的 fa-book 图标（已在影子内 FA 固壳 FA_SOLID_CONTENT），主题类随面板同步。 */
+    badgeEl = document.createElement('div');
+    badgeEl.id = 'rlog-badge';
+    badgeEl.className = 'rlog-badge';
+    badgeEl.title = '最近请求记录';
+    badgeEl.innerHTML = '<i class="fa-solid fa-book"></i>';
+    panelShadowRoot.appendChild(badgeEl);
+    initBadgeInteraction();
+    /* 宿主与浮标已就绪：重放一次主题类，让宿主带上 .rlog-light（浮标配色挂宿主，需此切换亮暗） */
+    applyTheme();
 
     /* H4 标题文字拆分：文字部分单击折叠/展开，数字部分双击设置最大记录数 */
     {
@@ -4637,7 +5041,9 @@ function buildUI() {
         /* 文字部分：单击立即折叠/展开窗口（无延迟） */
         textEl.addEventListener('click', (e) => {
             e.stopPropagation();
-            togglePanelWindow();
+            /* 引导期间不收起：浮标会让引导高亮目标（面板内元素）消失，破坏引导 */
+            if (tourActive) return;
+            togglePanelWindow(e);
         });
 
         /* 数字部分：双击弹出设置对话框（单击无反应） */
@@ -4734,6 +5140,27 @@ function buildUI() {
         });
     }
 
+    /* 全局点击监听：开启「点击面板外关闭」偏好时，点在主面板之外就关闭整个面板。
+       要点：
+       - 影子 DOM 下面板/弹窗/偏好浮层内的点击会重定向到 #rlog-shadow-host，用
+         `e.target === shadowHostEl || e.composedPath().includes(panelEl)` 判定「面板内」；
+       - 点击插件自己的菜单切换按钮（#prompt-capture-toggle）要放行——否则用切换按钮
+         "打开面板"的那一次点击会立刻把面板关掉（该按钮在面板外，但属插件自身开关）；
+       - 偏好标志在点击时读取，无需随开关增删监听。 */
+    if (!document.rlogOutsideCloseListenerInstalled) {
+        document.rlogOutsideCloseListenerInstalled = true;
+        document.addEventListener('click', (e) => {
+            if (!preferences.clickOutside || !isPanelVisible) return;
+            /* 浮标态：点面板外不清除浮标（浮标是插件入口，用户主动收起产生，不应被当待关闭面板处理）；
+               点击浮标本身由浮标自己的 pointerup 处理（恢复面板）。 */
+            if (isPanelCollapsed) return;
+            if (toggleBtn && toggleBtn.contains(e.target)) return;
+            const insidePanel = e.target === shadowHostEl || e.composedPath().includes(panelEl);
+            if (insidePanel) return;
+            hidePanel();
+        });
+    }
+
     panelEl.querySelector('#rlog-close-btn').addEventListener('click', hidePanel);
 
     panelEl.querySelector('#rlog-collapse-all-btn').addEventListener('click', (e) => {
@@ -4778,6 +5205,71 @@ function buildUI() {
 
     buildTempTestButton(panelEl);
 
+    /* 偏好设置：入口按钮 + 浮层 */
+    prefBtnEl = panelEl.querySelector('#rlog-pref-btn');
+    prefOverlayEl = panelEl.querySelector('#rlog-pref-overlay');
+
+    if (prefBtnEl) {
+        prefBtnEl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openPrefPanel();
+            e.currentTarget.blur();
+        });
+    }
+
+    if (prefOverlayEl) {
+        /* 右上角 × 为浮层唯一关闭方式 */
+        const prefCloseEl = prefOverlayEl.querySelector('.rlog-pref-close');
+        if (prefCloseEl) {
+            prefCloseEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                closePrefPanel();
+                e.currentTarget.blur();
+            });
+        }
+
+        /* 每个 Toggle：点击翻转状态 + 持久化 + 更新入口图标态（4 项行为均已接入实际行为） */
+        const toggles = prefOverlayEl.querySelectorAll('.rlog-toggle');
+        toggles.forEach((toggle) => {
+            toggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const key = toggle.getAttribute('data-pref-key');
+                if (!key) return;
+                setPreference(key, !preferences[key]);
+                e.currentTarget.blur();
+            });
+        });
+
+        /* 滚动提示箭头：内容需要滚动时更新上下方向提示 */
+        const prefListEl = prefOverlayEl.querySelector('.rlog-pref-list');
+        if (prefListEl) {
+            prefListEl.addEventListener('scroll', () => updatePrefScrollArrows(), { passive: true });
+        }
+
+        /* 遮罩点击：什么都不做（既不开也不关）——只作为「盖住面板、阻断底层内容交互」的层。
+           点击浮层外主面板范围不关闭浮层；浮层只能通过右上角 × 关闭。 */
+    }
+
+    /* 加载持久化偏好并同步入口图标 + 开关视觉（首次构建面板时初始化） */
+    loadPreferences();
+    updatePrefButtonIcon();
+    syncPrefToggleUI();
+    /* 移动端全屏：初始化时按偏好 + 当前视口设置全屏类（面板此刻 display:none，样式待展示时生效） */
+    updateMobileFullscreenClass();
+    /* 极简模式：初始化时按偏好给影子宿主加/去类（触发 :host 极简规则，关掉全部动效） */
+    updateMinimalClass();
+    /* 筛选状态持久化：开启时读取上次持久化的筛选并覆盖默认真实状态（在 updateFilterChipUI 前生效） */
+    loadPersistedFilterState();
+    /* 「浮标默认入口」：开启时启动默认显示浮标（右上角默认位置），面板保持隐藏、非折叠态，
+       扩展菜单入口不亮 active。badgePos 仍不持久化——刷新/重新初始化回到默认位置。 */
+    if (preferences.badgeDefault && badgeEl) {
+        if (!badgePos) badgePos = getDefaultBadgePos();
+        else badgePos = clampBadgeToViewport(badgePos.left, badgePos.top);
+        badgeEl.style.left = badgePos.left + 'px';
+        badgeEl.style.top = badgePos.top + 'px';
+        setBadgeActive(true);
+    }
+
     panelEl.querySelector('#rlog-theme-btn').addEventListener('click', (e) => {
         e.stopPropagation();
         isLightTheme = !isLightTheme;
@@ -4787,6 +5279,10 @@ function buildUI() {
         
         /* 触发主题切换专属缩放特效（不在打开窗口时触发） */
         panelEl.classList.remove('rlog-anim-light', 'rlog-anim-dark');
+
+        /* 极简模式：主题已通过 applyTheme() 瞬时切换，跳过缩放呼吸/颜色渐变编排，
+           避免 animation:none 下 animationend 不触发导致动画类残留。 */
+        if (preferences.minimal) return;
 
         /* 移动端（窄屏）禁用颜色过渡快速切换：大量展开消息时同时做 0.35s 渐变会明显卡顿， */
         /* 主题色在双 RAF 后瞬间切换完成再播放缩放动画； */
@@ -4857,6 +5353,18 @@ function buildUI() {
         window.rlogHeaderVarResizeInstalled = true;
         window.addEventListener('resize', () => {
             syncRecordHeaderVars(panelEl && panelEl.querySelector('#rlog-list'));
+            /* 浮标可见时随视口变化 clamp 回可视区域，避免窗口缩小后浮标跑出屏幕。
+               不限定折叠态：默认入口模式下浮标可能在非折叠态（面板关闭）显示，同样需要 clamp。 */
+            if (badgeEl && badgeEl.classList.contains('rlog-badge-active')) {
+                const pos = clampBadgeToViewport(
+                    parseFloat(badgeEl.style.left) || 0,
+                    parseFloat(badgeEl.style.top) || 0
+                );
+                badgeEl.style.left = pos.left + 'px';
+                badgeEl.style.top = pos.top + 'px';
+                /* resize 后同步更新会话内记录位置 */
+                badgePos = pos;
+            }
         });
     }
 
@@ -4888,8 +5396,17 @@ function togglePanel() {
 
 function showPanel() {
     if (!panelEl) buildUI();
+    /* 兜底：确保从浮标/折叠态回到展开面板（正常流程经 hidePanel 已复位，此处防御） */
+    setBadgeActive(false);
+    panelEl.classList.remove('rlog-window-collapsed');
+    isPanelCollapsed = false;
+    /* 「浮标默认入口」：重新打开面板一律回到插件默认位置/尺寸（点浮标与扩展菜单入口两个打开路径统一，
+       与「折叠→浮标→点浮标恢复」语义一致）；非默认入口维持原展示位置。 */
+    if (preferences.badgeDefault) resetPanelToDefault();
     panelEl.style.display = 'flex';
     isPanelVisible = true;
+    /* 移动端全屏：打开面板时应用/撤销全屏类（偏好开启 + 移动端视口才生效） */
+    updateMobileFullscreenClass();
     if (toggleBtn) toggleBtn.classList.add('active');
     /* 仅当数据/渲染设置变化时才重建 DOM；否则保留原有 DOM，避免大量展开消息时打开面板卡顿 */
     if (panelContentDirty) {
@@ -4920,6 +5437,9 @@ function hidePanel() {
     cancelPendingFlash();
     /* 关闭面板时隐式清理「查看全文」覆盖层（如存在） */
     closeReadFullOverlay();
+    /* 关闭面板时同时收起「偏好设置」浮层，避免浮层开着时关面板、重开仍残留打开态 */
+    closePrefPanel();
+    isPanelCollapsed = false;
     if (panelEl) {
         /* 清理置底跳转的标题栏闪烁类，防止下次打开面板时动画重播 */
         let cleared = false;
@@ -4929,12 +5449,24 @@ function hidePanel() {
         });
         /* 关闭面板等同主动打断：清空回顶时间戳，重开后回复重渲染不再补闪 */
         if (cleared) lastTopHintFlashAt = 0;
+        panelEl.classList.remove('rlog-window-collapsed');
         panelEl.style.display = 'none';
         /* 关闭面板时清理残留的主题切换动画类，防止下次打开时重播 */
         panelEl.classList.remove('rlog-anim-light', 'rlog-anim-dark');
     }
     isPanelVisible = false;
     if (toggleBtn) toggleBtn.classList.remove('active');
+    /* 「浮标默认入口」：关闭面板后浮标回到 badgePos（为空则用右上默认位置），浮标仍不持久化；
+       非默认入口保持现状——面板完全关闭、浮标消失。 */
+    if (preferences.badgeDefault && badgeEl) {
+        if (!badgePos) badgePos = getDefaultBadgePos();
+        else badgePos = clampBadgeToViewport(badgePos.left, badgePos.top);
+        badgeEl.style.left = badgePos.left + 'px';
+        badgeEl.style.top = badgePos.top + 'px';
+        setBadgeActive(true);
+    } else {
+        setBadgeActive(false);
+    }
 }
 
 
@@ -5020,6 +5552,84 @@ function makeResizable(el) {
         }
     });
 })();
+
+/* 浮标拖拽/点击交互（Pointer Events 统一鼠标与触屏）。
+   拖动只移动浮标自身；拖动结束时不能误触发 click 恢复面板——用位移阈值区分：
+   位移 > BADGE_DRAG_THRESHOLD 视为拖动，pointerup 时不再恢复；未达到阈值视为点击，恢复面板。 */
+function initBadgeInteraction() {
+    if (!badgeEl) return;
+    /* 点击浮标恢复面板后，浮标随即隐藏、同坐标出现面板；浏览器随后派发的原生 click
+       会被 hit-test 到该位置的面板按钮/标题上（误开「更多/筛选」抽屉或误触折叠）。
+       这里用 document 捕获阶段一次性守卫按 badgeSuppressNextClick 标记拦掉这一次 click。 */
+    if (!document.rlogBadgeClickGuardInstalled) {
+        document.rlogBadgeClickGuardInstalled = true;
+        document.addEventListener('click', (e) => {
+            if (badgeSuppressNextClick) {
+                badgeSuppressNextClick = false;
+                e.stopPropagation();
+                e.preventDefault();
+            }
+        }, true);
+    }
+    let dragActive = false;
+    let dragged = false;
+    let startX = 0, startY = 0, origLeft = 0, origTop = 0;
+
+    badgeEl.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        dragActive = true;
+        dragged = false;
+        startX = e.clientX;
+        startY = e.clientY;
+        origLeft = parseFloat(badgeEl.style.left) || 0;
+        origTop = parseFloat(badgeEl.style.top) || 0;
+        try { badgeEl.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        e.preventDefault();
+    });
+
+    badgeEl.addEventListener('pointermove', (e) => {
+        if (!dragActive) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        if (!dragged && Math.hypot(dx, dy) > BADGE_DRAG_THRESHOLD) {
+            dragged = true;
+        }
+        if (dragged) {
+            const pos = clampBadgeToViewport(origLeft + dx, origTop + dy);
+            badgeEl.style.left = pos.left + 'px';
+            badgeEl.style.top = pos.top + 'px';
+            /* 拖动后更新会话内记录位置，供下次收起复用 */
+            badgePos = pos;
+        }
+    });
+
+    const onBadgeUp = (e) => {
+        if (!dragActive) return;
+        dragActive = false;
+        e.stopPropagation();
+        try { badgeEl.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        /* 未拖动 → 视为点击，恢复面板 */
+        if (!dragged) {
+            /* 点击浮标恢复面板：浮标隐藏、面板出现在同坐标，后续原生 click 可能落到面板按钮
+               （更多/筛选）上误开抽屉。置一次性标记，交给上面的 document 捕获守卫拦掉这一次。 */
+            badgeSuppressNextClick = true;
+            setTimeout(() => { badgeSuppressNextClick = false; }, 0);
+            /* 「浮标默认入口」：点浮标=打开面板并回默认位置（默认入口下 isPanelCollapsed 可能为
+               false，不能走 togglePanelWindow 的「切换」语义，否则会再次收起）；非默认入口走原折叠切换。 */
+            if (preferences.badgeDefault) showPanel();
+            else togglePanelWindow();
+        }
+        dragged = false;
+    };
+    badgeEl.addEventListener('pointerup', onBadgeUp);
+    badgeEl.addEventListener('pointercancel', onBadgeUp);
+    /* pointerup 恢复面板后，浏览器仍会派发原生 click 并冒泡到文档；
+       此时 isPanelCollapsed 已复位，「点击面板外关闭」监听会误把面板关掉，
+       因此在浮标上消化掉该 click，不让它冒泡到文档级监听。 */
+    badgeEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+    });
+}
 
 function makeDraggable(el) {
     const header = el.querySelector('.rlog-panel-header');
@@ -5143,6 +5753,8 @@ window.__RLogApi = {
     records: () => records,
     /* 面板/影子根访问（供 tour.js 使用）：面板已挂进影子根，document 查找不到，改从这里取 */
     getPanelEl: () => panelEl,
+    /* 浮标访问（测试辅助）：浮标同样在影子根内，document 查找不到 */
+    getBadgeEl: () => badgeEl,
     q: (sel) => (panelShadowRoot ? panelShadowRoot.querySelector(sel) : null),
     /* 搜索相关（供 tour.js 使用） */
     openSearchForRecord: (recordIndex) => openSearchForRecord(recordIndex),
@@ -5213,8 +5825,9 @@ window.__RLogApi = {
         panelContentDirty = true;
         if (panelEl && isPanelVisible) renderPanelContent();
     },
-    /* 重置筛选（供引导/回归测试/外部调用） */
-    resetFilters: () => resetFilters(),
+    /* 重置筛选（供引导/回归测试/外部调用）。
+       引导开始时用它把筛选重置为全开以展示 demo，故不落盘；用户手动重置走界面按钮 resetFilters()（默认持久化）。 */
+    resetFilters: () => resetFilters(false),
     toggleFilterChip: (group, value) => toggleFilterChip(group, value),
     getVisibleRecordsCount: () => getVisibleRecords().length,
     /* 替换整个记录列表（供 tour.js 在引导期间清空/恢复记录使用） */
@@ -5258,6 +5871,11 @@ window.__RLogApi = {
         panelContentDirty = true;
         if (panelEl && isPanelVisible) renderPanelContent();
     },
+    /* 偏好设置（供测试/后续迭代使用） */
+    openPreferences: () => openPrefPanel(),
+    closePreferences: () => closePrefPanel(),
+    getPreferences: () => JSON.parse(JSON.stringify(preferences)),
+    setPreference: (key, value) => setPreference(key, value),
 };
 
 /* ── 临时测试功能 ───────────────────────── */
@@ -5421,9 +6039,12 @@ function buildTempTestButton(panelEl) {
     btn.className = 'rlog-header-btn';
     btn.title = '注入测试数据（Token 区间 / 成功 / 失败 / 超时）';
     btn.innerHTML = '<i class="fa-solid fa-vial"></i>';
-    const helpBtn = panelEl.querySelector('#rlog-help-btn');
-    if (helpBtn) {
-        helpBtn.insertAdjacentElement('afterend', btn);
+    /* 测试按钮插到「偏好设置」按钮之后（保证顺序：总开关-引导-偏好设置-测试-预览-删除-昼夜）；
+       偏好设置按钮已被临时移除时兜底插到「引导」之后。 */
+    const prefBtn = panelEl.querySelector('#rlog-pref-btn');
+    const anchor = prefBtn || panelEl.querySelector('#rlog-help-btn');
+    if (anchor) {
+        anchor.insertAdjacentElement('afterend', btn);
     } else {
         const drawer = panelEl.querySelector('#rlog-more-drawer');
         if (drawer) drawer.appendChild(btn);

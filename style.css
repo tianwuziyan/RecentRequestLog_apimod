@@ -11,10 +11,12 @@
    6. 搜索功能            放大镜、输入框、计数、命中高亮
    7. 记录内部消息列表    子消息标题栏、角色色、消息内容、overlay 滚动条、预览开关
    8. 主题切换动效        呼吸动画与颜色过渡
-   9. 弹窗                设置记录上限 / 确认弹窗（亮暗自成一套变量）
+   9. 弹窗                设置记录上限 / 确认弹窗（配色变量已并入顶部总表）
    10. 使用引导           引导高亮框、气泡、进度点
    11. 查看全文覆盖层     覆盖层标题栏、格式切换、内容区
-   12. 移动端适配         唯一断点 768px 的全部移动端规则
+   12. 偏好设置           轻量设置浮层（遮罩/标题/说明/Toggle 开关）
+   13. 浮标               收起面板后的小型插件入口（图标、主题色、显隐）
+   14. 移动端适配         唯一断点 768px 的全部移动端规则
    ============================================================ */
 
 /* 颜色统一由下方「主题颜色变量总表」提供，调色只改变量表（明亮一行 + 暗色覆盖一行）。 */
@@ -25,7 +27,8 @@
    ── 调色：改「明亮」一行的值，再改「暗色」块里同名变量的值，两处即全文件生效。
    ── 亮暗相同、只写一次的值（如来源 dot 色、危险按钮色）不需要在暗色块重复。
    说明：变量挂在 #rlog-panel 上，面板内所有元素自动继承；
-   弹窗挂在页面 body 上（不在面板内），所以在 .rlog-dialog 上单独声明同一套变量。
+   弹窗/浮标在影子根内、与 #rlog-panel 平级（不继承面板变量），故其配色归入 #rlog-shadow-host
+   （宿主自定义属性跨影子边界继承给影子内全部元素），亮/暗各一处；两处统一约定 base=明亮、:not(.rlog-light)=暗色。
    ════════════════════════════════════════════════════════════ */
 
 /* ── 明亮主题默认值（挂 #rlog-panel） ─────────── */
@@ -68,6 +71,7 @@
     --rlog-deep-bg-hover: #0f4063;     /* 主按钮 hover 底色（亮暗相同） */
     --rlog-deep-border: #0d3a5a;       /* 主按钮边框（亮暗相同） */
     --rlog-deep-border-hover: #0a2940; /* 主按钮 hover 边框（亮暗相同） */
+    --rlog-deep-text: #ffffff;         /* 主按钮文字（引导/弹窗确定，亮暗相同） */
     /* 通用 hover 背景 / 投影 */
     --rlog-hover-bg: rgba(0, 0, 0, 0.05);    /* 按钮/条目 hover 背景 */
     --rlog-hover-bg-strong: rgba(0, 0, 0, 0.08); /* hover/focus 加深背景 */
@@ -76,6 +80,7 @@
     /* 关闭遮罩 */
     --rlog-mask-bg: rgba(255, 255, 255, 0.6);  /* 插件关闭时遮罩背景 */
     --rlog-mask-text: #6b7280;                 /* 遮罩提示文字 */
+    --rlog-pref-overlay: rgba(0, 0, 0, 0.28);  /* 偏好设置浮层遮罩背景（轻量） */
     /* 来源 dot / 记录 hover 彩条 */
     --rlog-source-native: #1AC888;      /* 原生来源色（亮暗相同，只写一次） */
     --rlog-source-plugin: #FBBF24;      /* 插件来源色（亮暗相同，只写一次） */
@@ -192,6 +197,7 @@
     --rlog-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
     --rlog-mask-bg: rgba(24, 24, 27, 0.6);
     --rlog-mask-text: #a1a1aa;
+    --rlog-pref-overlay: rgba(0, 0, 0, 0.45);  /* 偏好设置浮层遮罩背景（轻量） */
     --rlog-status-succeed: #7EAE55;
     --rlog-status-fail: #ba4e49;
     --rlog-status-timeout: #BEAD40;
@@ -253,6 +259,74 @@
     --rlog-read-title: #f4f4f5;
     --rlog-read-text: #e4e4e7;
     --rlog-read-btn: #a1a1aa;
+}
+
+/* 弹窗/浮标主题色（挂影子宿主 #rlog-shadow-host 上）：弹窗与浮标都是 #rlog-panel 在影子根内的
+   平级兄弟，继承不到 #rlog-panel 上的变量；但宿主上的自定义属性会跨影子边界继承给全部影子子孙
+   （含弹窗、浮标），故把这两类配色放到宿主，集中进变量总表，亮/暗各一处。约定与上方面板一致：
+   base=明亮，:not(.rlog-light)=暗色。 */
+#rlog-shadow-host {
+    --rlog-dlg-bg: #ffffff;              /* 弹窗主体背景 */
+    --rlog-dlg-border: #d1d5db;          /* 弹窗主体边框 */
+    --rlog-dlg-header-bg: #f3f4f6;       /* 弹窗标题栏背景 */
+    --rlog-dlg-header-border: #e5e7eb;   /* 弹窗标题栏底边框 */
+    --rlog-dlg-header-text: #1f2937;     /* 弹窗标题栏文字 */
+    --rlog-dlg-text: #1f2937;            /* 弹窗默认文字 */
+    --rlog-dlg-text-strong: #111827;     /* 弹窗强调文字（加粗/按钮文字） */
+    --rlog-dlg-desc: #4b5563;            /* 弹窗说明文字 */
+    --rlog-dlg-close: #9ca3af;           /* 弹窗关闭按钮图标 */
+    --rlog-dlg-input-bg: #ffffff;        /* 输入框背景 */
+    --rlog-dlg-input-border: #d1d5db;    /* 输入框边框 */
+    --rlog-dlg-input-text: #1f2937;      /* 输入框文字 */
+    --rlog-dlg-accent: #124e78;          /* 聚焦边框色 */
+    --rlog-dlg-accent-glow: rgba(18, 78, 120, 0.15); /* 聚焦外圈光晕 */
+    --rlog-dlg-shadow: 0 8px 32px rgba(0, 0, 0, 0.15); /* 弹窗投影 */
+    --rlog-dlg-confirm-text: #374151;    /* 确认弹窗正文 */
+    --rlog-dlg-cancel-bg: #f3f4f6;       /* 取消按钮背景 */
+    --rlog-dlg-cancel-text: #374151;     /* 取消按钮文字 */
+    --rlog-dlg-cancel-border: #d1d5db;   /* 取消按钮边框 */
+    --rlog-dlg-cancel-bg-hover: #e5e7eb; /* 取消按钮 hover 背景 */
+    --rlog-dlg-cancel-border-hover: #9ca3af; /* 取消按钮 hover 边框 */
+    --rlog-dlg-confirm-bg: #124e78;      /* 确定按钮背景（亮暗相同） */
+    --rlog-dlg-confirm-bg-hover: #0f4063;/* 确定按钮 hover 背景（亮暗相同） */
+    --rlog-dlg-confirm-border: #0d3a5a;  /* 确定按钮边框（亮暗相同） */
+    --rlog-dlg-confirm-border-hover: #0a2940; /* 确定按钮 hover 边框（亮暗相同） */
+    --rlog-dlg-danger-bg: #dc2626;       /* 危险按钮背景（亮暗相同） */
+    --rlog-dlg-danger-bg-hover: #b91c1c; /* 危险按钮 hover 背景（亮暗相同） */
+    --rlog-dlg-danger-border: #b91c1c;   /* 危险按钮边框（亮暗相同） */
+    --rlog-dlg-danger-border-hover: #991b1b; /* 危险按钮 hover 边框（亮暗相同） */
+    --rlog-dlg-danger-text: #ffffff;     /* 危险按钮文字（亮暗相同） */
+    --rlog-dlg-danger: #ef4444;          /* 弹窗关闭按钮 hover 红 */
+    --rlog-dlg-danger-bg-soft: #fee2e2;  /* 弹窗关闭按钮 hover 背景 */
+    --rlog-dlg-overlay: rgba(0, 0, 0, 0.45); /* 弹窗遮罩背景（亮暗相同） */
+    --rlog-badge-bg: color-mix(in srgb, var(--SmartThemeQuoteColor, #52525b) 75%, transparent); /* 浮标背景=跟随 ST 引用文本色降透（透 25%，兜底深灰 #52525b 非黑/白/透明） */
+    --rlog-badge-icon: #ffffff;                        /* book 图标=白色（固定，亮暗相同） */
+    --rlog-badge-border: var(--SmartThemeQuoteColor, #52525b); /* 细边框=与浮标背景同色实心引用色（亮暗相同，兜底深灰 #52525b） */
+}
+#rlog-shadow-host:not(.rlog-light) {
+    --rlog-dlg-bg: #18181b;
+    --rlog-dlg-border: #3f3f46;
+    --rlog-dlg-header-bg: #27272a;
+    --rlog-dlg-header-border: #3f3f46;
+    --rlog-dlg-header-text: #f4f4f5;
+    --rlog-dlg-text: #e4e4e7;
+    --rlog-dlg-text-strong: #f4f4f5;
+    --rlog-dlg-desc: #a1a1aa;
+    --rlog-dlg-close: #a1a1aa;
+    --rlog-dlg-input-bg: #27272a;
+    --rlog-dlg-input-border: #52525b;
+    --rlog-dlg-input-text: #f4f4f5;
+    --rlog-dlg-accent: #a6d4f6;
+    --rlog-dlg-accent-glow: rgba(107, 169, 212, 0.15);
+    --rlog-dlg-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    --rlog-dlg-confirm-text: #a1a1aa;
+    --rlog-dlg-cancel-bg: #3f3f46;
+    --rlog-dlg-cancel-text: #e4e4e7;
+    --rlog-dlg-cancel-border: #52525b;
+    --rlog-dlg-cancel-bg-hover: #52525b;
+    --rlog-dlg-cancel-border-hover: #71717a;
+    --rlog-dlg-danger: #f87171;
+    --rlog-dlg-danger-bg-soft: rgba(248, 113, 113, 0.15);
 }
 
 /* ── 框架：面板容器 (明亮主题默认) ─────────────── */
@@ -596,20 +670,10 @@
     padding-bottom: 6px;
 }
 
-/* 窗口折叠状态：隐藏整个 body，只保留标题栏 */
-.rlog-window-collapsed .rlog-panel-body {
+/* 窗口折叠态（现为「浮标态」）：整个面板由 JS 设为 inline display:none 收起，不再保留细标题栏。
+   这里让折叠类与隐藏状态自洽——面板本体隐藏后，该 class 主要作为 JS 的状态标记。 */
+#rlog-panel.rlog-window-collapsed {
     display: none;
-}
-
-/* 窗口折叠状态：只保留标题文字、计数与关闭按钮，其余头部元素视觉隐藏并禁用交互。
-   用 visibility 而不是 display——元素仍占位，标题栏宽度与各按钮相对位置完全不变；
-   pointer-events: none 阻断点击/触摸，避免误触（键盘聚焦也会因 visibility 隐藏而失效）。
-   保留的例外：标题文字（点击展开）、计数（双击改上限）、关闭按钮（关面板）；
-   拖拽区不参与屏蔽——折叠态仍可按住标题栏空白处拖动面板（用户要求保留折叠态拖拽）。 */
-.rlog-window-collapsed .rlog-filter-indicator,
-.rlog-window-collapsed .rlog-header-actions > :not(#rlog-close-btn) {
-    visibility: hidden;
-    pointer-events: none;
 }
 
 /* ── 插件关闭状态遮罩（不阻挡交互） ────────── */
@@ -1488,7 +1552,6 @@ mark.rlog-search-mark-current {
    注意：JS 中已通过 inline style + !important 设置了关键定位属性，
    此处 CSS 作为样式回退，也使用 !important 防止父页面 transform 等属性破坏参考系 */
 .rlog-dialog-overlay {
-    --rlog-dlg-overlay: rgba(0, 0, 0, 0.45); /* 遮罩背景（亮暗相同；挂在遮罩自身，弹窗在其内部） */
     position: fixed !important;
     top: 0 !important;
     left: 0 !important;
@@ -1507,68 +1570,6 @@ mark.rlog-search-mark-current {
 @keyframes rlog-dialog-fadein {
     from { opacity: 0; }
     to { opacity: 1; }
-}
-
-/* 弹窗主题变量（挂 .rlog-dialog；弹窗在页面 body 上，不继承面板变量）
-   调色：改下方「明亮」一行 + 「暗色」同名变量一行 */
-.rlog-dialog {
-    --rlog-dlg-bg: #ffffff;              /* 弹窗主体背景 */
-    --rlog-dlg-border: #d1d5db;          /* 弹窗主体边框 */
-    --rlog-dlg-header-bg: #f3f4f6;       /* 弹窗标题栏背景 */
-    --rlog-dlg-header-border: #e5e7eb;   /* 弹窗标题栏底边框 */
-    --rlog-dlg-header-text: #1f2937;     /* 弹窗标题栏文字 */
-    --rlog-dlg-text: #1f2937;            /* 弹窗默认文字 */
-    --rlog-dlg-text-strong: #111827;     /* 弹窗强调文字（加粗/按钮文字） */
-    --rlog-dlg-desc: #4b5563;            /* 弹窗说明文字 */
-    --rlog-dlg-close: #9ca3af;           /* 弹窗关闭按钮图标 */
-    --rlog-dlg-input-bg: #ffffff;        /* 输入框背景 */
-    --rlog-dlg-input-border: #d1d5db;    /* 输入框边框 */
-    --rlog-dlg-input-text: #1f2937;      /* 输入框文字 */
-    --rlog-dlg-accent: #124e78;          /* 聚焦边框色 */
-    --rlog-dlg-accent-glow: rgba(18, 78, 120, 0.15); /* 聚焦外圈光晕 */
-    --rlog-dlg-shadow: 0 8px 32px rgba(0, 0, 0, 0.15); /* 弹窗投影 */
-    --rlog-dlg-confirm-text: #374151;    /* 确认弹窗正文 */
-    --rlog-dlg-cancel-bg: #f3f4f6;       /* 取消按钮背景 */
-    --rlog-dlg-cancel-text: #374151;     /* 取消按钮文字 */
-    --rlog-dlg-cancel-border: #d1d5db;   /* 取消按钮边框 */
-    --rlog-dlg-cancel-bg-hover: #e5e7eb; /* 取消按钮 hover 背景 */
-    --rlog-dlg-cancel-border-hover: #9ca3af; /* 取消按钮 hover 边框 */
-    --rlog-dlg-confirm-bg: #124e78;      /* 确定按钮背景（亮暗相同） */
-    --rlog-dlg-confirm-bg-hover: #0f4063;/* 确定按钮 hover 背景（亮暗相同） */
-    --rlog-dlg-confirm-border: #0d3a5a;  /* 确定按钮边框（亮暗相同） */
-    --rlog-dlg-confirm-border-hover: #0a2940; /* 确定按钮 hover 边框（亮暗相同） */
-    --rlog-dlg-danger-bg: #dc2626;       /* 危险按钮背景（亮暗相同） */
-    --rlog-dlg-danger-bg-hover: #b91c1c; /* 危险按钮 hover 背景（亮暗相同） */
-    --rlog-dlg-danger-border: #b91c1c;   /* 危险按钮边框（亮暗相同） */
-    --rlog-dlg-danger-border-hover: #991b1b; /* 危险按钮 hover 边框（亮暗相同） */
-    --rlog-dlg-danger-text: #ffffff;     /* 危险按钮文字（亮暗相同） */
-    --rlog-dlg-danger: #ef4444;          /* 弹窗关闭按钮 hover 红 */
-    --rlog-dlg-danger-bg-soft: #fee2e2;  /* 弹窗关闭按钮 hover 背景 */
-}
-.rlog-dialog:not(.rlog-dialog-light) {
-    --rlog-dlg-bg: #18181b;
-    --rlog-dlg-border: #3f3f46;
-    --rlog-dlg-header-bg: #27272a;
-    --rlog-dlg-header-border: #3f3f46;
-    --rlog-dlg-header-text: #f4f4f5;
-    --rlog-dlg-text: #e4e4e7;
-    --rlog-dlg-text-strong: #f4f4f5;
-    --rlog-dlg-desc: #a1a1aa;
-    --rlog-dlg-close: #a1a1aa;
-    --rlog-dlg-input-bg: #27272a;
-    --rlog-dlg-input-border: #52525b;
-    --rlog-dlg-input-text: #f4f4f5;
-    --rlog-dlg-accent: #a6d4f6;
-    --rlog-dlg-accent-glow: rgba(107, 169, 212, 0.15);
-    --rlog-dlg-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-    --rlog-dlg-confirm-text: #a1a1aa;
-    --rlog-dlg-cancel-bg: #3f3f46;
-    --rlog-dlg-cancel-text: #e4e4e7;
-    --rlog-dlg-cancel-border: #52525b;
-    --rlog-dlg-cancel-bg-hover: #52525b;
-    --rlog-dlg-cancel-border-hover: #71717a;
-    --rlog-dlg-danger: #f87171;
-    --rlog-dlg-danger-bg-soft: rgba(248, 113, 113, 0.15);
 }
 
 /* 弹窗主体 */
@@ -1892,12 +1893,12 @@ mark.rlog-search-mark-current {
 
 .rlog-tour-btn.rlog-tour-primary {
     background: var(--rlog-deep-bg);
-    color: #ffffff;
+    color: var(--rlog-deep-text);
 }
 
 .rlog-tour-btn.rlog-tour-primary:hover {
     background: var(--rlog-deep-bg-hover);
-    color: #ffffff;
+    color: var(--rlog-deep-text);
 }
 
 /* ============================================================
@@ -2135,6 +2136,263 @@ mark.rlog-search-mark-current {
 }
 
 /* ============================================================
+   偏好设置（轻量设置浮层）
+   ============================================================ */
+
+/* 遮罩层：盖住整个插件面板、阻断底层内容交互。
+   只作为遮罩，不绑定任何点击关闭行为——浮层仅由右上角 × 关闭。 */
+.rlog-pref-overlay {
+    position: absolute;
+    inset: 0;
+    background: var(--rlog-pref-overlay);
+    /* 轻微模糊下层背景文字，降低对偏好设置的干扰；数值可手动调整（当前 1px） */
+    -webkit-backdrop-filter: blur(1px);
+    backdrop-filter: blur(1px);
+    z-index: 200; /* 高于面板头部(50)、记录标题栏(20)、消息标题栏(10)、缩放角标(30) */
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    box-sizing: border-box;
+}
+.rlog-pref-overlay.rlog-pref-open {
+    display: flex;
+}
+
+/* 设置浮层：竖向长方形，居中。 */
+.rlog-pref-panel {
+    width: min(236px, 92%); /* 按内容收窄：文字+开关刚好放下，消除右侧空白（可按需再调） */
+    max-height: 78%;
+    display: flex;
+    flex-direction: column;
+    background: var(--rlog-bg);
+    border: 1px solid var(--rlog-border);
+    border-radius: 4px;
+    box-shadow: var(--rlog-shadow);
+    overflow: hidden;
+    font-weight: normal;
+}
+
+/* 标题区：题目 + 右上角 ×。这只是弹窗容器顶部的一行普通内容——不给标题区域单独加
+   背景/边框/分隔线/内层框体，整个弹窗只有一个容器，靠文字样式区分层级。
+   说明文字并入左侧文本块，× 相对「标题 + 说明」整块垂直居中（与开关对齐方式一致）。 */
+.rlog-pref-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px 8px;
+    flex-shrink: 0;
+}
+.rlog-pref-header-text {
+    flex: 1;
+    min-width: 0;
+}
+.rlog-pref-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--rlog-text-title);
+    letter-spacing: 0.5px;
+    user-select: none;
+    line-height: 1;
+    white-space: nowrap;
+}
+.rlog-pref-close {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--rlog-icon-faint);
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0;
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    transition: color 0.15s, background 0.15s;
+}
+.rlog-pref-close:hover { color: var(--rlog-danger); background: var(--rlog-danger-bg); }
+
+/* 标题下方的总说明（并入标题文本块，与设置项标题↔说明的间距一致为 3px） */
+.rlog-pref-sub {
+    margin-top: 3px;
+    font-size: 9px;
+    line-height: 1.5;
+    color: var(--rlog-text-muted);
+    user-select: none;
+}
+
+/* 标题/说明 与 设置项 之间的轻量分隔线 */
+.rlog-pref-divider {
+    height: 1px;
+    background: var(--rlog-border-header);
+    margin: 0 12px; /* 两端不封口：不与边界相连，留出左右空隙 */
+    flex-shrink: 0;
+}
+
+/* 设置项列表包裹层：承载可滚动列表 + 两端滚动提示箭头（箭头绝对定位，不占布局高度） */
+.rlog-pref-list-wrap {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* 设置项列表：可滚动，隐藏滚动条但保留滚动功能 */
+.rlog-pref-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    padding: 2px 12px 6px;
+}
+.rlog-pref-list::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+}
+
+/* 单个设置项 */
+.rlog-pref-item {
+    display: flex;
+    align-items: center; /* 开关针对「标题 + 说明」整个文本块垂直居中，自动随内容行数变化 */
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 0;
+}
+
+/* 滚动提示箭头：仅作为滚动状态提示，不参与交互，不占固定高度。
+   默认隐藏，列表真的可滚/仍可滚时由 JS 加 .rlog-pref-arrow-visible 显示。
+   用带前缀的更高优先级选择器覆盖影子内 FA 固壳的 .fa-solid{display:inline-block}，
+   否则箭头会始终显示（FA 规则更靠后，同优先级下会压过这里的 display:none）。 */
+.rlog-pref-list-wrap .rlog-pref-scroll {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--rlog-text-muted);
+    opacity: 0.55;
+    pointer-events: none;
+    font-size: 10px;
+    line-height: 1;
+    z-index: 2;
+    display: none;
+}
+.rlog-pref-list-wrap .rlog-pref-scroll-up { top: 2px; }   /* 与上方分隔线空开 2px */
+.rlog-pref-list-wrap .rlog-pref-scroll-down { bottom: 0.5px; } /* 与下方边框空开 0.5px */
+.rlog-pref-list-wrap .rlog-pref-scroll.rlog-pref-arrow-visible {
+    display: block;
+}
+
+/* 设置项文本块：标题 + 说明 组成一个左对齐的纵向区块 */
+.rlog-pref-item-text {
+    flex: 1;
+    min-width: 0;
+}
+.rlog-pref-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--rlog-text);
+    line-height: 1.4;
+    user-select: none;
+}
+/* 设置项说明：下一行、左对齐、更小、次要色 */
+.rlog-pref-item-desc {
+    margin-top: 3px;
+    font-size: 9px;
+    line-height: 1.5;
+    color: var(--rlog-text-muted);
+    user-select: none;
+}
+
+/* Toggle 开关：类似播放器/工具栏控件，右对齐，相对整个设置项（标题+说明）垂直居中。
+   轨道是 1px 细线（非粗实线），滑块是实心小方块（约 2px 小圆角）。
+   关闭：滑块在左、使用现有普通文字色，轨道用次级文字色；
+   开启：滑块滑到右、使用主题色，轨道用普通文字色（不变成醒目的主题色）。
+   整体高度与设置项文字行高相仿。 */
+.rlog-toggle {
+    position: relative;
+    flex-shrink: 0;
+    width: 34px;
+    height: 16px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+}
+.rlog-toggle::after {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    width: 8px;
+    height: 8px;
+    transform: translateY(-50%);
+    border-radius: 2px; /* 小方块小圆角 */
+    background: var(--rlog-text); /* 关闭：普通文字色 */
+    transition: left 0.15s, background 0.15s;
+}
+/* 轨道：1px 细线，垂直居中，两端到控件边缘 */
+.rlog-toggle::before {
+    content: '';
+    position: absolute;
+    left: 2px;
+    right: 2px;
+    top: 50%;
+    height: 1px;
+    transform: translateY(-50%);
+    background: var(--rlog-text-muted); /* 关闭：次级文字色 */
+    transition: background 0.15s;
+}
+.rlog-toggle.rlog-toggle-on {
+    background: transparent;
+}
+.rlog-toggle.rlog-toggle-on::after {
+    left: 24px; /* 34 - 8(方块) - 2(左右间距) = 24，到位后方块右移 */
+    background: var(--rlog-accent); /* 开启：主题色 */
+}
+.rlog-toggle.rlog-toggle-on::before {
+    background: var(--rlog-text); /* 开启：轨道用普通文字色（非醒目的主题色） */
+}
+
+/* ════════════════════════════════════════════════════════════
+   13. 浮标（收起面板后的小型插件入口）
+   ── 挂在影子根内、与 #rlog-panel 平级（不在面板内），继承不到 #rlog-panel 上的变量，
+      所以配色改由上方「主题颜色变量总表」里挂 #rlog-shadow-host（影子宿主）的变量提供，
+      宿主自定义属性跨影子边界继承给浮标，从而仍统一走变量总表。
+   ── 外观：小型圆角方块，只用图标（fa-book，复用插件列表书图标），
+      背景=跟随 ST 引用文本色（--SmartThemeQuoteColor）降透、book=白色、边框=与背景同色实心（引用色）；
+      不加额外投影/渐变/计数/状态文字。移动端尺寸在末尾「移动端适配」缩到 32×32。
+   ── 显隐：默认 display:none；JS 在收起面板时加 .rlog-badge-active 显示，恢复时移除。
+   ════════════════════════════════════════════════════════════ */
+.rlog-badge {
+    position: fixed;
+    display: none;
+    width: 36px;
+    height: 36px;
+    border-radius: 6px;
+    align-items: center;
+    justify-content: center;
+    background: var(--rlog-badge-bg);
+    border: 1px solid var(--rlog-badge-border);
+    color: var(--rlog-badge-icon);
+    font-size: 16px; /* book 图标大小 */
+    cursor: pointer;
+    z-index: 2999; /* 高于普通内容(聊天区 30)，低于 ST 顶部设置抽屉(3005)：打开世界书/扩展/预设等不遮挡 */
+    user-select: none;
+    -webkit-user-select: none;
+}
+.rlog-badge.rlog-badge-active {
+    display: flex;
+}
+
+/* ============================================================
    移动端适配（唯一断点：max-width: 768px）
    所有移动端规则集中在此，改断点只改这一处。
    说明：原「缩短主题切换过渡/动画时长」两条规则已移除——
@@ -2149,6 +2407,12 @@ mark.rlog-search-mark-current {
         max-height: 75vh;
         top: 40px;
         border-radius: 0;
+    }
+    /* 移动端浮标（≤768px）：与桌面 36×36 同步缩到 32×32，book 图标相应缩小 */
+    .rlog-badge {
+        width: 32px;
+        height: 32px;
+        font-size: 14px;
     }
     .rlog-panel-header {
         padding: 8px 10px;
@@ -2393,5 +2657,34 @@ mark.rlog-search-mark-current {
     }
     .rlog-read-header-actions {
         gap: 3px;
+    }
+
+/* ── 偏好设置浮层移动端 ────────────────────────────── */
+/* 收紧遮罩内边距与浮层宽度上限；「移动端全屏」实际行为见下方规则。 */
+    .rlog-pref-overlay {
+        padding: 12px;
+    }
+    .rlog-pref-panel {
+        width: min(236px, 90vw);
+    }
+
+    /* ── 移动端全屏（偏好设置） ─────────────────────── */
+    /* 开启「移动端全屏」偏好后：面板铺满整个移动端视口。
+       - 展开态用 top/left/宽高 100vw/100vh 让面板占满整屏、内容区照常滚动；
+       - 用 `:not(.rlog-window-collapsed)` 只在展开态套高度：折叠后仍只显示标题栏，行为不变；
+       - `!important` 用于压过折叠/拖拽/缩放写在 JS 行内样式里的 top/left/width/height，
+         确保打开即全屏、折叠后再展开也回到全屏；桌面端因断点隔离不受影响。 */
+    #rlog-panel.rlog-mobile-fullscreen {
+        top: 0 !important;
+        left: 0 !important;
+        transform: none !important;
+        width: 100vw !important;
+        max-width: 100vw !important;
+        border-radius: 0 !important;
+    }
+    #rlog-panel.rlog-mobile-fullscreen:not(.rlog-window-collapsed) {
+        height: 100vh !important;
+        min-height: 100vh !important;
+        max-height: 100vh !important;
     }
 }
