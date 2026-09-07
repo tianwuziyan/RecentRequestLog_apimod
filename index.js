@@ -66,6 +66,9 @@ const BADGE_SIZE = 36;               /* 浮标边长(px)：桌面端 36×36（�
 const BADGE_DRAG_THRESHOLD = 5;      /* 浮标拖动判定阈值(px)：位移超过该值视为拖动，否则视为点击恢复面板 */
 const BADGE_DEFAULT_MARGIN_RIGHT = 16; /* 浮标默认位置距视口右缘的距离(px)：「浮标默认入口」开启时启动默认位置 */
 const BADGE_DEFAULT_MARGIN_TOP = 12;  /* 浮标默认位置在 ST 顶部设置栏下缘往下的距离(px) */
+const LONG_PRESS_MS = 550;            /* 长按判定阈值(ms)：按下超过此时间且移动未超过容差视为长按 */
+const LONG_PRESS_MOVE_TOLERANCE = 8;  /* 长按移动容差(px)：按下后位移超过该值取消长按 */
+const PIN_TOAST_DURATION_MS = 1800;   /* 置顶/取消置顶提示自动消失时间(ms) */
 
 /* 影子内 FA 固壳：仅插件实际使用的 33 个实心图标（content 取自 ST 现版 fontawesome.min.css 6.5.2，非猜测）
    新增图标时在此补一行「图标名: '\\fXXX'」即可 */
@@ -197,8 +200,14 @@ let panelShadowRoot = null;
 /* HTMLElement|null: 影子宿主元素（挂在 body 上，承载影子根） */
 let shadowHostEl = null;
 
-/* HTMLElement|null: 浮标元素（收起面板后的小型插件入口，挂在影子根内、与面板平级） */
+/* HTMLElement|null: 浮标 light DOM 宿主（收起面板后的小型插件入口）。
+   新版拆成独立 light DOM host（#rlog-badge-host）并挂到 document.body，
+   供第三方收纳插件识别/收纳；可见视觉在其自己的 shadow root 内（.rlog-badge-visual）。 */
 let badgeEl = null;
+
+/* HTMLElement|null: 浮标可见视觉元素（挂在 badgeEl 自己的 shadow root 内）。
+   document 查找不到，仅供 __RLogApi.getBadgeVisualEl() 等测试辅助使用。 */
+let badgeVisualEl = null;
 
 /* {left,top}|null: 浮标会话内位置（浮标左上角坐标）。
    首次收起记录点击座标，拖动后更新，再次收起复用；页面刷新/重新初始化时随模块重载自动清空。 */
@@ -233,6 +242,18 @@ let masterEnabled = true;
 
 /* HTMLElement|null: 设置最大记录数的弹窗 DOM 元素 */
 let maxRecordsDialog = null;
+
+/* HTMLElement|null: 置顶/取消置顶轻量提示 toast 元素（面板顶部居中） */
+let pinToastEl = null;
+
+/* timeout|null: 置顶/取消置顶提示自动消失的定时器 */
+let pinToastTimer = null;
+
+/* boolean: 长按置顶触发后置为 true，用于抑制随后一次的记录标题栏 click（避免误折叠/展开） */
+let suppressRecordHeaderClick = false;
+
+/* boolean: 移动端长按重排期间是否已绑定 hover 抑制清理（避免重复监听/堆积） */
+let hoverSuppressBound = false;
 
 /* 面板拖拽/缩放相关 */
 let panelResizing = false;
@@ -1842,6 +1863,26 @@ function computeMessagesFingerprint(messages) {
     }).join('|');
 }
 
+/* 返回当前普通记录（未置顶）列表。置顶记录单独存在 pinned 标记里，不参与普通容量。 */
+function getNormalRecords() {
+    return records.filter(r => !r.pinned);
+}
+
+/* 裁剪超出普通记录上限的最旧普通记录（从数组末尾向前找并删除，保持 records 原顺序）。
+   置顶记录跳过，不被清理；被删除记录若有在途回复则取消追踪。
+   置顶记录不计入上限，因此 records.length 可能大于 MAX_RECORDS。 */
+function pruneNormalRecords() {
+    let overCount = getNormalRecords().length - MAX_RECORDS;
+    if (overCount <= 0) return;
+    for (let i = records.length - 1; i >= 0 && overCount > 0; i--) {
+        const rec = records[i];
+        if (rec.pinned) continue;
+        records.splice(i, 1);
+        if (rec.id != null) abortPendingReply(rec.id);
+        overCount--;
+    }
+}
+
 function addRecord(characterName, messages, source, modelName, rawBody, captureId) {
     if (!masterEnabled) return;
     if (!characterName || !messages || messages.length === 0) return;
@@ -1868,6 +1909,7 @@ function addRecord(characterName, messages, source, modelName, rawBody, captureI
         messages,
         rawBody: rawBody || null,   /* 原始请求体 JSON 对象（「查看全文」原始格式用） */
         collapsed: true,
+        pinned: false,                /* 临时置顶标记：不占用普通记录上限，刷新即重置 */
         id: captureId != null ? captureId : null, /* 请求捕获编号，回复挂载用 */
         reply: null,                 /* 回复内容（独立存储，不计入请求消息/查看全文） */
     };
@@ -1903,11 +1945,7 @@ function addRecord(characterName, messages, source, modelName, rawBody, captureI
     }
 
     records.unshift(record);
-    if (records.length > MAX_RECORDS) {
-        const evicted = records.pop();
-        /* 被挤出的记录若仍有回复在途，取消追踪避免挂起的读取器占用资源 */
-        if (evicted && evicted.id != null) abortPendingReply(evicted.id);
-    }
+    pruneNormalRecords();
 
     panelContentDirty = true;
     if (panelEl && isPanelVisible) {
@@ -1916,9 +1954,15 @@ function addRecord(characterName, messages, source, modelName, rawBody, captureI
         renderPanelContent();
         if (!isPanelCollapsed) {
             if (!filterActive || newRecordVisible) {
-                /* 面板完全展开可见时：新记录到达立即回顶到最新一条 + 闪烁 */
-                if (listEl) listEl.scrollTop = 0;
-                flashTopHint();
+                /* 面板完全展开可见时：定位到新记录自身（置顶记录可能在其上方），并闪烁新记录 */
+                const newRecordEl = getRecordElByIndex(0);
+                if (newRecordEl) {
+                    scrollToRecordEl(newRecordEl);
+                    flashTopHint(newRecordEl);
+                } else {
+                    if (listEl) listEl.scrollTop = 0;
+                    flashTopHint();
+                }
             } else if (listEl) {
                 /* 新记录被筛选隐藏：保持原阅读位置 */
                 listEl.scrollTop = prevScrollTop;
@@ -1934,9 +1978,12 @@ function addRecord(characterName, messages, source, modelName, rawBody, captureI
 }
 
 function clearAllRecords() {
-    /* 清空记录时同步取消所有在途回复追踪，避免残留读取器/待办 */
-    pendingReplies.forEach((_, captureId) => abortPendingReply(captureId));
-    records = [];
+    /* 只清空普通记录；置顶记录保留，且其未终态回复继续追踪 */
+    records = records.filter(r => {
+        if (r.pinned) return true;
+        if (r.id != null) abortPendingReply(r.id);
+        return false;
+    });
     panelContentDirty = true;
     if (panelEl && isPanelVisible) {
         renderPanelContent();
@@ -2244,10 +2291,8 @@ function setMaxRecords(newMax) {
     MAX_RECORDS = newMax;
     saveMaxRecords(MAX_RECORDS);
 
-    /* 如果当前记录数超过新上限，裁剪掉多余的旧记录 */
-    while (records.length > MAX_RECORDS) {
-        records.pop();
-    }
+    /* 如果当前普通记录数超过新上限，裁剪掉最旧的普通记录；置顶记录不受影响 */
+    pruneNormalRecords();
 
     /* 刷新标题栏显示 */
     updateHeaderTitle();
@@ -3437,14 +3482,18 @@ function renderPanelContent() {
         panelEl.style.setProperty('--rlog-status-w', `${statusMaxW}px`);
     }
 
-    /* 只渲染可见记录；DOM 的 data-record-index 仍写入 records 中的真实索引，
+    /* 只渲染可见记录；置顶记录先渲染，普通记录随后，两条子组内均保持 records 原顺序（新→旧）。
+       DOM 的 data-record-index 仍写入 records 中的真实索引，而非显示位置，
        搜索/复制/删除/查看全文/回复挂载等按索引取数的路径无需改语义 */
-    const visibleIndexes = visibleRecords.map((rec) => records.indexOf(rec));
-    listEl.innerHTML = visibleRecords
+    const displayRecords = visibleRecords.filter(r => r.pinned)
+        .concat(visibleRecords.filter(r => !r.pinned));
+    const displayIndexes = displayRecords.map((rec) => records.indexOf(rec));
+    listEl.innerHTML = displayRecords
         .map((rec, vi) => {
-            const idx = visibleIndexes[vi];
+            const idx = displayIndexes[vi];
             const totalTokens = getTotalTokens(rec.messages);
             const collapsedClass = rec.collapsed ? 'collapsed' : 'expanded';
+            const pinnedClass = rec.pinned ? 'rlog-pinned' : '';
             const sourceLabel = getSourceLabel(rec.source);
             const sourceClass = getSourceClass(rec.source);
             const sourceType = sourceClass === 'rlog-source-native' ? 'native' : 'plugin';
@@ -3476,9 +3525,9 @@ function renderPanelContent() {
                     : '');
 
             return `
-                <div class="rlog-record ${collapsedClass}" data-source="${sourceType}" data-record-index="${idx}">
+                <div class="rlog-record ${collapsedClass} ${pinnedClass}" data-source="${sourceType}" data-record-index="${idx}">
                     <div class="rlog-record-header">
-                        <div class="rlog-record-info">
+                        <div class="rlog-record-info" title="长按置顶 / 长按取消置顶">
                             <span class="rlog-char-name">${escapeHtml(rec.characterName)}</span>
                             <span class="rlog-source-badge ${sourceClass}" title="${escapeHtml(sourceTitle)}"><span class="rlog-status-dot"></span>${escapeHtml(sourceLabel)}</span>
                             <span class="rlog-time">${escapeHtml(rec.timestamp)}</span>
@@ -3635,6 +3684,11 @@ function bindListEvents(listEl) {
             mouseDownInSearchBox = e.target.closest('.rlog-search-box') !== null;
         });
         header.addEventListener('click', function (e) {
+            /* 长按置顶后，本次触发的 native click 不再折叠/展开记录 */
+            if (suppressRecordHeaderClick) {
+                suppressRecordHeaderClick = false;
+                return;
+            }
             if (e.target.closest('button')) return;
             /* 搜索框区域（输入框/计数/空白）不触发折叠/展开，保持搜索状态稳定 */
             if (e.target.closest('.rlog-search-box')) return;
@@ -3647,6 +3701,75 @@ function bindListEvents(listEl) {
             preserveScrollTop(() => {
                 toggleRecordCollapse(idx, recordEl);
             }, this);
+        });
+
+        /* 长按记录标题栏切换置顶：绑定到整个 .rlog-record-header。
+           - 折叠状态：按钮隐藏，整行（含空白/状态标签/箭头）都可长按；
+           - 展开状态：仅排除真实 <button> 实际所占区域，以及搜索框这个交互区；
+           - 单击折叠/展开逻辑不交叠（长按触发后抑制后续 click）。
+           使用 Pointer Events 实现：移动超容差或提前抬起即取消。 */
+        let longPressTimer = null;
+        let activePointerId = null;
+        let currentPointerType = null;
+        let startX = 0;
+        let startY = 0;
+
+        const cancelLongPress = () => {
+            if (longPressTimer !== null) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+            if (activePointerId !== null && header.hasPointerCapture) {
+                /* 尝试释放 capture；异常静默 */
+                try { header.releasePointerCapture(activePointerId); } catch (err) { /* ignore */ }
+            }
+            activePointerId = null;
+        };
+
+        /* 长按是否应跳过：真实按钮始终排除；搜索框是交互区也排除（其余空白/状态都不防御性屏蔽） */
+        const isLongPressExcluded = (e) => e.target.closest('button') !== null
+            || e.target.closest('.rlog-search-box') !== null;
+
+        header.addEventListener('pointerdown', (e) => {
+            if (e.pointerType === 'mouse' && e.button !== 0) return;
+            if (isLongPressExcluded(e)) return;
+            const recordEl = header.closest('.rlog-record');
+            if (!recordEl) return;
+            const index = Number(recordEl.dataset.recordIndex);
+            cancelLongPress();
+            currentPointerType = e.pointerType;
+            activePointerId = e.pointerId;
+            startX = e.clientX;
+            startY = e.clientY;
+            /* 鼠标：显式 capture 以便移动超容差时仍收到 pointermove；触屏用隐式 capture + touch-action 控制滚动 */
+            if (e.pointerType !== 'touch') {
+                try { header.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+            }
+            longPressTimer = setTimeout(() => {
+                longPressTimer = null;
+                suppressRecordHeaderClick = true;
+                setTimeout(() => { suppressRecordHeaderClick = false; }, 50);
+                /* 仅移动端：长按重排后抑制补位记录的触摸模拟 hover，手指抬起后恢复正常 */
+                if (currentPointerType === 'touch') beginHoverSuppress();
+                toggleRecordPinned(index, header);
+            }, LONG_PRESS_MS);
+        });
+
+        header.addEventListener('pointermove', (e) => {
+            if (longPressTimer === null) return;
+            const dx = Math.abs(e.clientX - startX);
+            const dy = Math.abs(e.clientY - startY);
+            if (dx > LONG_PRESS_MOVE_TOLERANCE || dy > LONG_PRESS_MOVE_TOLERANCE) {
+                cancelLongPress();
+            }
+        });
+
+        header.addEventListener('pointerup', () => cancelLongPress());
+        header.addEventListener('pointercancel', () => cancelLongPress());
+        /* 移动端长按非按钮标题栏不弹系统菜单（按钮/搜索框保持原生行为） */
+        header.addEventListener('contextmenu', (e) => {
+            if (isLongPressExcluded(e)) return;
+            e.preventDefault();
         });
     });
 
@@ -3756,6 +3879,95 @@ function toggleRecordCollapse(index, recordEl) {
         /* 展开记录后，为消息内容区懒创建进度条（仅视口内立即创建，其余延迟） */
         queueScrollbarsForEls(recordEl.querySelectorAll('.rmsg-content'));
     }
+}
+
+/* 切换单条记录的临时置顶状态。
+   - 置顶时不占用普通记录上限、不参与自动清理。
+   - 从普通变置顶且记录展开时折叠整条记录（子消息折叠状态不变）。
+   - 取消置顶不自动展开，记录恢复参与普通记录清理。
+   - 不主动滚动到该记录（保留当前滚动位置），仅用 toast 反馈。 */
+function toggleRecordPinned(index, infoEl) {
+    if (index < 0 || index >= records.length) return;
+    const record = records[index];
+    if (!record) return;
+
+    resetSearchIfActive();
+
+    record.pinned = !record.pinned;
+    if (record.pinned && !record.collapsed) {
+        record.collapsed = true;
+    }
+
+    panelContentDirty = true;
+    const listEl = panelEl ? panelEl.querySelector('#rlog-list') : null;
+    const prevScrollTop = listEl ? listEl.scrollTop : 0;
+    if (panelEl && isPanelVisible) {
+        renderPanelContent();
+        /* 渲染重建后保留当前滚动位置（置顶/取消置顶不主动跳到记录所在处） */
+        if (listEl && listEl.isConnected) {
+            const maxScroll = Math.max(0, listEl.scrollHeight - listEl.clientHeight);
+            listEl.scrollTop = Math.min(prevScrollTop, maxScroll);
+        }
+    }
+
+    showPinToast(record.pinned
+        ? '已置顶，不受普通记录清理影响'
+        : '已取消置顶，将重新参与普通记录清理');
+}
+
+/* 显示置顶/取消置顶的轻量 toast（面板顶部居中）。
+   连续多次只替换文本并重置自动消失定时器，不堆叠。 */
+function showPinToast(text) {
+    if (!panelEl) return;
+    if (!pinToastEl) pinToastEl = panelEl.querySelector('#rlog-pin-toast');
+    if (!pinToastEl) return;
+    if (pinToastTimer !== null) clearTimeout(pinToastTimer);
+    pinToastEl.textContent = text;
+    pinToastEl.classList.add('rlog-pin-toast-active');
+    pinToastTimer = setTimeout(hidePinToast, PIN_TOAST_DURATION_MS);
+}
+
+/* 隐藏置顶/取消置顶 toast（自动消失或点击提前消除）。 */
+function hidePinToast() {
+    if (pinToastTimer !== null) {
+        clearTimeout(pinToastTimer);
+        pinToastTimer = null;
+    }
+    if (pinToastEl) {
+        pinToastEl.classList.remove('rlog-pin-toast-active');
+    }
+}
+
+/* 移动端长按重排期间的 hover 抑制：
+   给 #rlog-list 加临时类，让补位记录不因触摸模拟 hover 凭空高亮；
+   抑制类在「下一次新触摸/点击(pointerdown)」或「鼠标移动(pointermove)」时移除，
+   不随本次手势的 pointerup/pointercancel 清除，避免触摸浏览器残留 :hover 重新冒出。 */
+function beginHoverSuppress() {
+    if (!panelEl) return;
+    const listEl = panelEl.querySelector('#rlog-list');
+    if (!listEl) return;
+    listEl.classList.add('rlog-hover-suppress');
+    if (hoverSuppressBound) return;
+    hoverSuppressBound = true;
+
+    const end = () => {
+        if (!hoverSuppressBound) return;
+        hoverSuppressBound = false;
+        const cur = panelEl ? panelEl.querySelector('#rlog-list') : null;
+        if (cur) cur.classList.remove('rlog-hover-suppress');
+        document.removeEventListener('pointerdown', end, { capture: true });
+        document.removeEventListener('pointermove', onMouseMove, { capture: true });
+    };
+
+    const onMouseMove = (e) => { if (e.pointerType === 'mouse') end(); };
+
+    /* 不在本次手势的 pointerup/pointercancel 就清除：触摸浏览器（Android WebView 等）会残留 :hover，
+       且重排时可能触发 pointercancel，过早清除都会让补位条目重新显示 hover。
+       改为：下一次新触摸/点击(pointerdown)或鼠标移动(pointermove)时再清除。
+       不设兜底超时——纯触屏没有鼠标 hover，等待下一次 pointerdown 才清除，
+       避免「隔一会儿自动恢复抑制导致残留 hover 又冒出来」。 */
+    document.addEventListener('pointerdown', end, { capture: true });
+    document.addEventListener('pointermove', onMouseMove, { capture: true });
 }
 
 function toggleMessageCollapse(recIdx, msgIdx, msgItem) {
@@ -3969,14 +4181,38 @@ function clearHeaderFlash(scopeEl) {
     }
 }
 
+/* 按真实 records 索引取当前列表中的记录 DOM 元素（渲染顺序可能与 records 顺序不同，
+   但 data-record-index 始终写真实索引，故查询可用）。 */
+function getRecordElByIndex(index) {
+    if (!panelEl) return null;
+    const listEl = panelEl.querySelector('#rlog-list');
+    return listEl ? listEl.querySelector(`.rlog-record[data-record-index="${index}"]`) : null;
+}
+
+/* 滚动列表，使指定记录标题栏出现在可视区顶部（置顶记录可能排在目标记录上方）。
+   用视图坐标差计算，避免依赖 offsetTop 与定位父级。 */
+function scrollToRecordEl(recordEl) {
+    if (!panelEl || !recordEl) return;
+    const listEl = panelEl.querySelector('#rlog-list');
+    if (!listEl) return;
+    const listRect = listEl.getBoundingClientRect();
+    const recordRect = recordEl.getBoundingClientRect();
+    const target = listEl.scrollTop + (recordRect.top - listRect.top);
+    const maxScroll = Math.max(0, listEl.scrollHeight - listEl.clientHeight);
+    const clamped = Math.min(Math.max(0, target), maxScroll);
+    if (Math.abs(clamped - listEl.scrollTop) > 1) {
+        listEl.scrollTop = clamped;
+    }
+}
+
 /* 无按钮回顶时的提示闪烁：列表回到顶部后，对顶部（最新一条）记录做一次
    与置底相同的轻微闪烁，提示「当前已回到最新一条」。
    顶部记录展开时闪第一条子消息标题栏（与置底镜像），折叠/不可见时闪记录标题栏
    （保证目标始终可见）。界面未打开（后台记录状态）或窗口折叠时不触发。 */
-function flashTopHint() {
+function flashTopHint(recordEl) {
     if (!panelEl || !isPanelVisible || isPanelCollapsed) return;
     const listEl = panelEl.querySelector('#rlog-list');
-    const firstRecord = listEl ? listEl.querySelector('.rlog-record') : null;
+    const firstRecord = recordEl || (listEl ? listEl.querySelector('.rlog-record') : null);
     if (!firstRecord) return;
     let target = firstRecord.querySelector('.rmsg-header');
     if (!target || !target.offsetParent) {
@@ -4662,6 +4898,24 @@ function getDefaultBadgePos() {
     );
 }
 
+/* 浮标尺寸同步：host 的宽/高随桌面 36 / 移动 32 切换（getBadgeSize 已按断点返回）。
+   初始化与 resize 时调用，避免桌面↔移动切换后尺寸不同步。 */
+function updateBadgeSize() {
+    if (!badgeEl) return;
+    const size = getBadgeSize();
+    badgeEl.style.width = size + 'px';
+    badgeEl.style.height = size + 'px';
+}
+
+/* 浮标主题变量：把原挂 #rlog-shadow-host 的三个浮标变量接到新的 light DOM host 上，
+   由 host 跨影子边界继承给 shadow root 内的 .rlog-badge-visual，配色仍跟随 ST 主题。 */
+function syncBadgeThemeVars() {
+    if (!badgeEl) return;
+    badgeEl.style.setProperty('--rlog-badge-bg', 'color-mix(in srgb, var(--SmartThemeQuoteColor, #52525b) 75%, transparent)');
+    badgeEl.style.setProperty('--rlog-badge-icon', '#ffffff');
+    badgeEl.style.setProperty('--rlog-badge-border', 'var(--SmartThemeQuoteColor, #52525b)');
+}
+
 /* 重置面板为默认定位/尺寸：清掉此前拖拽/缩放写入的 inline 样式，让 CSS 默认值生效
    （默认：top:80px + left:50% + translateX(-50%) + 宽高/上下限走 style.css 基准）。
    不额外做边界修正：默认定位本就居中/贴边、在视口内（水平由 95vw 上限保证，
@@ -4685,6 +4939,8 @@ function setBadgeActive(active) {
     if (!badgeEl) return;
     if (active) badgeEl.classList.add('rlog-badge-active');
     else badgeEl.classList.remove('rlog-badge-active');
+    /* host 是 light DOM，用 inline display 最稳，避免第三方主题通过普通 CSS 影响显隐 */
+    badgeEl.style.display = active ? 'flex' : 'none';
 }
 
 /* 标题文字点击触发的「面板 ↔ 浮标」切换。
@@ -4695,6 +4951,7 @@ function togglePanelWindow(ev) {
         /* 收起为浮标：会话内首次收起以当次点击标题文字的坐标作为浮标中心并记录；
            会话内再次收起复用记录的位置（拖动过后即为拖动后位置）。
            展开/拖动标题栏不影响记录值；刷新/重新初始化后 badgePos 重置为 null，按首次收起处理。 */
+        hidePinToast();
         panelEl.classList.add('rlog-window-collapsed');
         panelEl.style.display = 'none';
         if (badgeEl) {
@@ -4717,14 +4974,24 @@ function togglePanelWindow(ev) {
         panelEl.classList.remove('rlog-window-collapsed');
         panelEl.style.display = 'flex';
         resetPanelToDefault();
+        /* 折叠期间可能已有数据/渲染变化（新记录到达），恢复前先重建 DOM */
+        if (panelContentDirty) {
+            renderPanelContent();
+        }
         /* 窗口重新展开后重测记录标题栏高度（隐藏期间 offsetHeight 为 0，吸顶偏移需刷新） */
         syncRecordHeaderVars(panelEl.querySelector('#rlog-list'));
         /* 折叠期间有新记录到达时，恢复展开后回到列表顶部最新一条 */
         if (pendingScrollToTop) {
             pendingScrollToTop = false;
-            const listEl = panelEl.querySelector('#rlog-list');
-            if (listEl) listEl.scrollTop = 0;
-            flashTopHint();
+            const newRecordEl = getRecordElByIndex(0);
+            if (newRecordEl) {
+                scrollToRecordEl(newRecordEl);
+                flashTopHint(newRecordEl);
+            } else {
+                const listEl = panelEl.querySelector('#rlog-list');
+                if (listEl) listEl.scrollTop = 0;
+                flashTopHint();
+            }
         }
     }
 }
@@ -4847,6 +5114,25 @@ function buildFaShimStyle() {
     return style;
 }
 
+/* 浮标视觉样式：浮标已拆成独立 light DOM host（#rlog-badge-host），可见视觉放在它自己的 shadow root 内。
+   - host 本身只负责定位/尺寸/光标/透明背景（走 inline 样式），不放视觉；
+   - 视觉（背景/边框/圆角/图标颜色/字号）全部由 shadow root 内 .rlog-badge-visual 提供，
+     第三方主题的普通 CSS 依然碰不到（继续受 Shadow DOM 隔离）；
+   - --rlog-badge-* 自定义属性由 syncBadgeThemeVars() 写到 host 上，跨影子边界继承给视觉元素，
+     配色仍跟随 ST 主题（--SmartThemeQuoteColor 引用文本色）。 */
+function buildBadgeStyle() {
+    const style = document.createElement('style');
+    style.textContent = [
+        ':host{box-sizing:border-box;background:transparent;border:0;padding:0;margin:0}',
+        '.rlog-badge-visual{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;'
+            + 'border-radius:6px;background:var(--rlog-badge-bg,#52525b);'
+            + 'border:1px solid var(--rlog-badge-border,#52525b);color:var(--rlog-badge-icon,#fff);'
+            + 'font-size:16px;cursor:pointer;user-select:none;-webkit-user-select:none}',
+        '@media(max-width:768px){.rlog-badge-visual{font-size:14px}}',
+    ].join('\n');
+    return style;
+}
+
 /* 影子内「极简模式」样式：通过 :host(.rlog-minimal) 一次性关闭面板/弹窗的全部过渡与动画。
    用 :host 而不是 #rlog-panel 前缀，是因为设置上限/确认弹窗挂在 panelShadowRoot、
    与 #rlog-panel 平级（不在面板内），只有 :host 能同时兜住面板与弹窗。
@@ -4962,6 +5248,7 @@ function buildUI() {
             </div>
             <div class="rlog-resize-grip" title="拖动调整窗口大小"></div>
         </div>
+        <div id="rlog-pin-toast" class="rlog-pin-toast" aria-live="polite"></div>
         <div class="rlog-pref-overlay" id="rlog-pref-overlay">
             <div class="rlog-pref-panel">
                 <div class="rlog-pref-header">
@@ -5029,16 +5316,38 @@ function buildUI() {
     panelShadowRoot.appendChild(panelEl);
     document.body.appendChild(shadowHostEl);
 
-    /* 浮标：收起面板后的小型插件入口（与 #rlog-panel 平级，放在影子根内），默认隐藏。
-       复用插件列表里的 fa-book 图标（已在影子内 FA 固壳 FA_SOLID_CONTENT），主题类随面板同步。 */
+    /* 浮标：拆成独立 light DOM host（#rlog-badge-host）+ 自己的 shadow root。
+       - host 暴露在普通 DOM，带 script_id/role/title/class/固定定位，供第三方收纳插件识别/收纳；
+       - 可见视觉放在 host 自己的 shadow root 内（.rlog-badge-visual），第三方主题 CSS 碰不到；
+       - 里面放一个隐藏的 light DOM 图标，方便收纳插件用 querySelector('i') 提取图标；
+       - host 只承担定位/尺寸/光标/透明背景，不放视觉。 */
     badgeEl = document.createElement('div');
-    badgeEl.id = 'rlog-badge';
-    badgeEl.className = 'rlog-badge';
+    badgeEl.id = 'rlog-badge-host';
+    badgeEl.className = 'rlog-badge-host rlog-floating-button';
+    badgeEl.setAttribute('script_id', 'recent-request-log-badge');
+    badgeEl.setAttribute('role', 'button');
+    badgeEl.setAttribute('aria-label', '最近请求记录');
     badgeEl.title = '最近请求记录';
-    badgeEl.innerHTML = '<i class="fa-solid fa-book"></i>';
-    panelShadowRoot.appendChild(badgeEl);
+    badgeEl.style.cssText =
+        `position:fixed;display:none;width:${getBadgeSize()}px;height:${getBadgeSize()}px;`
+        + 'cursor:pointer;z-index:2999;box-sizing:border-box;background:transparent;border:0;padding:0;margin:0;';
+    /* 隐藏的 light DOM 图标：宿主有 shadow root，light 子元素默认不渲染，且带 hidden，双保险不显示 */
+    badgeEl.innerHTML = '<i class="fa-solid fa-book" hidden></i>';
+
+    const badgeShadowRoot = badgeEl.attachShadow({ mode: 'open' });
+    badgeShadowRoot.appendChild(buildBadgeStyle());
+    badgeShadowRoot.appendChild(buildFaShimStyle());
+    badgeVisualEl = document.createElement('div');
+    badgeVisualEl.className = 'rlog-badge-visual';
+    badgeVisualEl.innerHTML = '<i class="fa-solid fa-book"></i>';
+    badgeShadowRoot.appendChild(badgeVisualEl);
+    document.body.appendChild(badgeEl);
+
+    /* 把浮标主题变量挂到 host，并同步当前尺寸；然后交给指针交互 */
+    syncBadgeThemeVars();
+    updateBadgeSize();
     initBadgeInteraction();
-    /* 宿主与浮标已就绪：重放一次主题类，让宿主带上 .rlog-light（浮标配色挂宿主，需此切换亮暗） */
+    /* host 就绪后重放主题类（浮标可见视觉由 host 上的 --rlog-badge-* 提供） */
     applyTheme();
 
     /* H4 标题文字拆分：文字部分单击折叠/展开，数字部分双击设置最大记录数 */
@@ -5180,18 +5489,26 @@ function buildUI() {
 
     panelEl.querySelector('#rlog-clear-btn').addEventListener('click', (e) => {
         e.stopPropagation();
-        if (records.length === 0) {
-            /* 没有记录时无需确认，直接提示无内容可清空 */
+        const normalCount = getNormalRecords().length;
+        const pinnedCount = records.length - normalCount;
+        if (normalCount === 0) {
+            /* 没有普通记录：统一用轻量提示反馈，不弹确认弹窗、不删除任何记录 */
+            showPinToast(pinnedCount > 0
+                ? '没有可清空的普通记录，置顶记录不会被清除'
+                : '没有可清空的记录');
             return;
         }
-        /* 筛选生效时在确认文案中注明被隐藏的记录也会一并清空 */
-        const visibleCount = getVisibleRecords().length;
-        const hiddenCount = records.length - visibleCount;
+        /* 筛选生效时在确认文案中注明被隐藏的普通记录也会一并清空 */
+        const visibleNormalCount = getVisibleRecords().filter(r => !r.pinned).length;
+        const hiddenNormalCount = normalCount - visibleNormalCount;
+        const pinnedNote = pinnedCount > 0
+            ? `<br>（<strong>${pinnedCount}</strong> 条置顶记录会保留）`
+            : '<br>（无置顶记录）';
         showConfirmDialog({
             title: '清空所有记录',
-            message: hiddenCount > 0
-                ? `确定要清空全部 <strong>${records.length}</strong> 条请求记录吗？（其中 <strong>${hiddenCount}</strong> 条被筛选隐藏，也会一并清空）<br>此操作不可撤销。`
-                : `确定要清空全部 <strong>${records.length}</strong> 条请求记录吗？<br>此操作不可撤销。`,
+            message: hiddenNormalCount > 0
+                ? `确定要清空全部 <strong>${normalCount}</strong> 条普通请求记录吗？（其中 <strong>${hiddenNormalCount}</strong> 条被筛选隐藏，也会一并清空）${pinnedNote}<br>此操作不可撤销。`
+                : `确定要清空全部 <strong>${normalCount}</strong> 条普通请求记录吗？${pinnedNote}<br>此操作不可撤销。`,
             confirmText: '清空',
             cancelText: '取消',
             onConfirm: () => {
@@ -5363,6 +5680,8 @@ function buildUI() {
         window.rlogHeaderVarResizeInstalled = true;
         window.addEventListener('resize', () => {
             syncRecordHeaderVars(panelEl && panelEl.querySelector('#rlog-list'));
+            /* 桌面↔移动切换时同步浮标尺寸 */
+            updateBadgeSize();
             /* 浮标可见时随视口变化 clamp 回可视区域，避免窗口缩小后浮标跑出屏幕。
                不限定折叠态：默认入口模式下浮标可能在非折叠态（面板关闭）显示，同样需要 clamp。 */
             if (badgeEl && badgeEl.classList.contains('rlog-badge-active')) {
@@ -5388,6 +5707,15 @@ function buildUI() {
 
     /* 同步筛选分段按钮视觉状态（默认全开；引导/API 改动过状态时以实际状态为准） */
     updateFilterChipUI();
+
+    /* 置顶/取消置顶提示：点击可提前消除（阻止事件冒泡避免触发文档级「点击面板外关闭」） */
+    const pinToast = panelEl.querySelector('#rlog-pin-toast');
+    if (pinToast) {
+        pinToast.addEventListener('click', (e) => {
+            e.stopPropagation();
+            hidePinToast();
+        });
+    }
 
     renderPanelContent();
 }
@@ -5428,10 +5756,15 @@ function showPanel() {
     /* 面板关闭期间有新记录到达时，重新打开后回到列表顶部最新一条 */
     if (pendingScrollToTop && !isPanelCollapsed) {
         pendingScrollToTop = false;
-        const listEl = panelEl.querySelector('#rlog-list');
-        if (listEl) listEl.scrollTop = 0;
-        /* 面板关闭期间来新消息，重新打开回顶后提示最新一条位置 */
-        flashTopHint();
+        const newRecordEl = getRecordElByIndex(0);
+        if (newRecordEl) {
+            scrollToRecordEl(newRecordEl);
+            flashTopHint(newRecordEl);
+        } else {
+            const listEl = panelEl.querySelector('#rlog-list');
+            if (listEl) listEl.scrollTop = 0;
+            flashTopHint();
+        }
     }
 
     /* 在面板显示后检查是否需要进行引导 */
@@ -5443,6 +5776,8 @@ function showPanel() {
 function hidePanel() {
     /* 关闭面板时退出搜索模式 */
     resetSearchIfActive();
+    /* 关闭面板时隐藏置顶/取消置顶 toast */
+    hidePinToast();
     /* 关闭面板时取消尚未触发的置底闪烁（避免关闭后定时器在隐藏 DOM 上触发） */
     cancelPendingFlash();
     /* 关闭面板时隐式清理「查看全文」覆盖层（如存在） */
@@ -5618,26 +5953,35 @@ function initBadgeInteraction() {
         dragActive = false;
         e.stopPropagation();
         try { badgeEl.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-        /* 未拖动 → 视为点击，恢复面板 */
-        if (!dragged) {
-            /* 点击浮标恢复面板：浮标隐藏、面板出现在同坐标，后续原生 click 可能落到面板按钮
-               （更多/筛选）上误开抽屉。置一次性标记，交给上面的 document 捕获守卫拦掉这一次。 */
+        const wasDrag = dragged;
+        if (wasDrag) {
+            /* 拖拽：浏览器仍会在 pointerup 后补发原生 click，拦掉它以免误当成「点击打开面板」 */
             badgeSuppressNextClick = true;
             setTimeout(() => { badgeSuppressNextClick = false; }, 0);
-            /* 「浮标默认入口」：点浮标=打开面板并回默认位置（默认入口下 isPanelCollapsed 可能为
-               false，不能走 togglePanelWindow 的「切换」语义，否则会再次收起）；非默认入口走原折叠切换。 */
-            if (preferences.badgeDefault) showPanel();
-            else togglePanelWindow();
         }
+        if (e.type === 'pointercancel') {
+            /* 指针取消（如触摸被系统打断）：不派生 click，直接结束 */
+            dragged = false;
+            return;
+        }
+        /* 未拖动：这里不再打开面板/隐藏浮标，交给随后的 click 阶段处理。
+           让浮标在整个 click 事件派发期间保持可见，需要在该阶段识别它的第三方插件不会因我们提前隐藏而失效；
+           面板打开延后到 click 之后（下面 click 监听里 setTimeout），因此面板也不会误接同一次 click。 */
         dragged = false;
     };
     badgeEl.addEventListener('pointerup', onBadgeUp);
     badgeEl.addEventListener('pointercancel', onBadgeUp);
-    /* pointerup 恢复面板后，浏览器仍会派发原生 click 并冒泡到文档；
-       此时 isPanelCollapsed 已复位，「点击面板外关闭」监听会误把面板关掉，
-       因此在浮标上消化掉该 click，不让它冒泡到文档级监听。 */
+    /* 点击（含第三方对 host 直接触发的原生 click）：
+       - 拖拽后的补发 click 已被上面 badgeSuppressNextClick 守卫拦掉，不会走到这里；
+       - 这里只把「打开面板」延后到本次 click 全部派发完之后执行，保持浮标在该阶段可见；
+       - 不再主动 stopPropagation，让 click 正常冒泡，不挡住其他监听（各 state 已保证不会误关面板）。 */
     badgeEl.addEventListener('click', (e) => {
-        e.stopPropagation();
+        /* 兜底：若拖拽后的 click 未被上游拦掉（极少数），这里再拦一次 */
+        if (badgeSuppressNextClick) return;
+        setTimeout(() => {
+            if (preferences.badgeDefault) showPanel();
+            else togglePanelWindow();
+        }, 0);
     });
 }
 
@@ -5763,8 +6107,10 @@ window.__RLogApi = {
     records: () => records,
     /* 面板/影子根访问（供 tour.js 使用）：面板已挂进影子根，document 查找不到，改从这里取 */
     getPanelEl: () => panelEl,
-    /* 浮标访问（测试辅助）：浮标同样在影子根内，document 查找不到 */
+    /* 浮标访问（测试辅助）：真实浮标已拆为 light DOM host #rlog-badge-host（视觉在其 shadow root 内），
+       document 可直接查到该 host；可见视觉元素用 getBadgeVisualEl() 获取。 */
     getBadgeEl: () => badgeEl,
+    getBadgeVisualEl: () => badgeVisualEl,
     q: (sel) => (panelShadowRoot ? panelShadowRoot.querySelector(sel) : null),
     /* 搜索相关（供 tour.js 使用） */
     openSearchForRecord: (recordIndex) => openSearchForRecord(recordIndex),
@@ -5843,10 +6189,8 @@ window.__RLogApi = {
     /* 替换整个记录列表（供 tour.js 在引导期间清空/恢复记录使用） */
     setRecords: (newRecords) => {
         records = Array.isArray(newRecords) ? newRecords : [];
-        /* 保持「记录数不超过上限」的既有约束（引导恢复时暂存记录可能使总数超限） */
-        if (records.length > MAX_RECORDS) {
-            records.length = MAX_RECORDS;
-        }
+        /* 只裁剪超出普通上限的普通记录；置顶记录保留（引导恢复的暂存记录可能使总数超限） */
+        pruneNormalRecords();
         panelContentDirty = true;
         if (panelEl && isPanelVisible) renderPanelContent();
     },
