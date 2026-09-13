@@ -15,7 +15,7 @@
    10. 使用引导           引导高亮框、气泡、进度点
    11. 查看全文覆盖层     覆盖层标题栏、格式切换、内容区
    12. 偏好设置           轻量设置浮层（遮罩/标题/说明/Toggle 开关）
-   13. 浮标               收起面板后的小型插件入口（图标、主题色、显隐）
+   13. 浮标               收起面板后的小型插件入口（圆形外观、深浅配色、显隐）
    14. 置顶提示 toast     置顶/取消置顶轻量提示（颜色/定位/显隐）
    15. 移动端适配         唯一断点 768px 的全部移动端规则
    ============================================================ */
@@ -24,12 +24,9 @@
 
 /* ════════════════════════════════════════════════════════════
    主题颜色变量总表
-   ── 用法：下方所有规则里的颜色都写成 var(--变量名)。
-   ── 调色：改「明亮」一行的值，再改「暗色」块里同名变量的值，两处即全文件生效。
-   ── 亮暗相同、只写一次的值（如来源 dot 色、危险按钮色）不需要在暗色块重复。
-   说明：变量挂在 #rlog-panel 上，面板内所有元素自动继承；
-   弹窗/浮标在影子根内、与 #rlog-panel 平级（不继承面板变量），故其配色归入 #rlog-shadow-host
-   （宿主自定义属性跨影子边界继承给影子内全部元素），亮/暗各一处；两处统一约定 base=明亮、:not(.rlog-light)=暗色。
+   ── 所有颜色只在本表定义，规则里一律写 var(--变量名)；调色只改本表。
+   ── 约定：base=明亮，:not(.rlog-light)=暗色；亮暗相同只写一次。
+   ── 变量挂 #rlog-panel（面板内继承）；弹窗与浮标在影子根内，各有自己的宿主变量块（见下方两块）。
    ════════════════════════════════════════════════════════════ */
 
 /* ── 明亮主题默认值（挂 #rlog-panel） ─────────── */
@@ -38,15 +35,15 @@
     --rlog-bg: #ffffff;                /* 面板容器背景 */
     --rlog-bg-header: #f3f4f6;         /* 面板/弹窗标题栏背景 */
     --rlog-bg-record: #ffffff;         /* 记录标题栏背景 */
-    --rlog-bg-record-hover: #f1f2f4;   /* 记录标题栏 hover 背景（日间略深，置顶常驻同步此色） */
+    --rlog-bg-record-hover: #f9fafb;   /* 记录标题栏 hover 背景（同时是置顶记录常驻底色） */
+    --rlog-bg-record-pinned-hover: #f4f5f7; /* 置顶 hover：再暗一档（上限＝标题栏 #f3f4f6） */
     --rlog-bg-msg: #f9fafb;            /* 子消息标题栏背景 */
-    --rlog-bg-msg-hover: #ececee;      /* 子消息标题栏 hover 背景 */
+    --rlog-bg-msg-hover: #f2f3f5;      /* 子消息标题栏 hover 背景（已回退到置顶前的原值） */
     --rlog-bg-body: #f9fafb;           /* 记录正文区背景 */
     /* 置顶/取消置顶提示 toast */
     --rlog-pin-toast-bg: rgba(255, 255, 255, 0.9); /* 提示背景（少量透明度/微圆角/细边框） */
     --rlog-pin-toast-border: #d1d5db;  /* 提示细边框 */
     --rlog-pin-toast-text: #374151;    /* 提示文字 */
-    --rlog-pin-toast-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); /* 提示投影 */
     /* 边框 / 分隔线 */
     --rlog-border: #d1d5db;            /* 面板/弹窗边框、输入框边框、信息项竖线 */
     --rlog-divider: #d1d5db;           /* 记录信息项竖线分隔符（暗色与边框不同） */
@@ -172,13 +169,13 @@
     --rlog-bg-header: #27272a;
     --rlog-bg-record: #18181b;
     --rlog-bg-record-hover: #212124;
+    --rlog-bg-record-pinned-hover: #262629; /* 置顶 hover：再亮一档（上限＝标题栏 #27272a） */
     --rlog-bg-msg: #121214;
     --rlog-bg-msg-hover: #18181a;
     --rlog-bg-body: #121214;
     --rlog-pin-toast-bg: rgba(39, 39, 42, 0.9); /* 暗色提示背景（少量透明度/微圆角/细边框） */
     --rlog-pin-toast-border: #52525b;
     --rlog-pin-toast-text: #e4e4e7;
-    --rlog-pin-toast-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
     --rlog-border: #3f3f46;
     --rlog-divider: #52525b;
     --rlog-border-header: #3f3f46;
@@ -271,10 +268,8 @@
     --rlog-read-btn: #a1a1aa;
 }
 
-/* 弹窗/浮标主题色（挂影子宿主 #rlog-shadow-host 上）：弹窗与浮标都是 #rlog-panel 在影子根内的
-   平级兄弟，继承不到 #rlog-panel 上的变量；但宿主上的自定义属性会跨影子边界继承给全部影子子孙
-   （含弹窗、浮标），故把这两类配色放到宿主，集中进变量总表，亮/暗各一处。约定与上方面板一致：
-   base=明亮，:not(.rlog-light)=暗色。 */
+/* 弹窗配色挂影子宿主 #rlog-shadow-host：弹窗与 #rlog-panel 在影子根内平级、继承不到面板变量，
+   而宿主自定义属性会跨影子边界继承给影子内全部元素。约定同上：base=明亮。 */
 #rlog-shadow-host {
     --rlog-dlg-bg: #ffffff;              /* 弹窗主体背景 */
     --rlog-dlg-border: #d1d5db;          /* 弹窗主体边框 */
@@ -309,10 +304,61 @@
     --rlog-dlg-danger: #ef4444;          /* 弹窗关闭按钮 hover 红 */
     --rlog-dlg-danger-bg-soft: #fee2e2;  /* 弹窗关闭按钮 hover 背景 */
     --rlog-dlg-overlay: rgba(0, 0, 0, 0.45); /* 弹窗遮罩背景（亮暗相同） */
-    --rlog-badge-bg: color-mix(in srgb, var(--SmartThemeQuoteColor, #52525b) 75%, transparent); /* 浮标背景=跟随 ST 引用文本色降透（透 25%，兜底深灰 #52525b 非黑/白/透明） */
-    --rlog-badge-icon: #ffffff;                        /* book 图标=白色（固定，亮暗相同） */
-    --rlog-badge-border: var(--SmartThemeQuoteColor, #52525b); /* 细边框=与浮标背景同色实心引用色（亮暗相同，兜底深灰 #52525b） */
 }
+
+/* 浮标配色挂独立宿主 #rlog-badge-host：两套固定配色按 ST 主题反向取用（浅色 ST → 深色浮标，
+   由 index.js 加减 .rlog-badge-light 切换），每套分「常规 + 悬停」共 4 组，数值只在本块维护。
+   每套写两个分支：文档里的 #rlog-badge-host 与影子内的 :host(#rlog-badge-host)（被第三方收纳进影子树后靠它）。
+   悬停只换这 4 个变量、不做缩放（原因见 13 区）；渐变拆成两个色标才能做 0.2s 过渡。 */
+@property --rlog-badge-grad-from {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: #5A5E66; /* 取深色浮标的渐变起点：不支持 @property 时退回深色一套 */
+}
+@property --rlog-badge-grad-to {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: #3E4148; /* 取深色浮标的渐变终点：不支持 @property 时退回深色一套 */
+}
+
+/* 深色浮标（浅色 ST 主题时使用）· 常规 */
+#rlog-badge-host:not(.rlog-badge-light),
+:host(#rlog-badge-host:not(.rlog-badge-light)) {
+    --rlog-badge-bg: #4A4D54;        /* 渐变之下的底色 */
+    --rlog-badge-grad-from: #5A5E66; /* 渐变起点（左上亮端） */
+    --rlog-badge-grad-to: #3E4148;   /* 渐变终点（右下暗端） */
+    --rlog-badge-icon: #F1F1F3;      /* 图标色 */
+}
+
+/* 浅色浮标（深色 ST 主题时使用，宿主带 .rlog-badge-light）· 常规 */
+#rlog-badge-host.rlog-badge-light,
+:host(#rlog-badge-host.rlog-badge-light) {
+    --rlog-badge-bg: #F1F1F3;        /* 渐变之下的底色 */
+    --rlog-badge-grad-from: #FFFFFF; /* 渐变起点（左上亮端） */
+    --rlog-badge-grad-to: #D3D3D9;   /* 渐变终点（右下暗端） */
+    --rlog-badge-icon: #4A4D54;      /* 图标色 */
+}
+
+/* 悬停配色（只换上面 4 个变量）：深色浮标提亮一档、浅色浮标压暗一档，两端色标同步偏移，
+   保证颜色过渡期间「底色 / 渐变 / 图标」始终一起变（相位一致，不会有谁先谁后）。
+   (hover: hover) 限定真正的指针悬停设备：触屏合成的「残影 hover」会让浮标一直变色。 */
+@media (hover: hover) {
+    #rlog-badge-host:not(.rlog-badge-light):hover,
+    :host(#rlog-badge-host:not(.rlog-badge-light):hover) {
+        --rlog-badge-bg: #595D66;
+        --rlog-badge-grad-from: #6F737C;
+        --rlog-badge-grad-to: #4B4E56;
+        --rlog-badge-icon: #FFFFFF;
+    }
+    #rlog-badge-host.rlog-badge-light:hover,
+    :host(#rlog-badge-host.rlog-badge-light:hover) {
+        --rlog-badge-bg: #DCDCE2;
+        --rlog-badge-grad-from: #F2F2F5;
+        --rlog-badge-grad-to: #BDBDC5;
+        --rlog-badge-icon: #383B41;
+    }
+}
+
 #rlog-shadow-host:not(.rlog-light) {
     --rlog-dlg-bg: #18181b;
     --rlog-dlg-border: #3f3f46;
@@ -426,11 +472,8 @@
     gap: var(--rlog-header-gap);
 }
 
-/* 「更多」「筛选」两个抽屉都作为按钮区最前面的 flex 项（位于「更多」按钮左侧）：
-   展开时从左侧撑开按钮区，按钮区整体向标题方向延伸，「更多」按钮及右侧按钮横向位置不动；
-   移动端按钮区放不下时整体换到第二行（与原来「更多」抽屉的展开/收起动态一致）。
-   折叠时抽屉仍是零宽 flex 槽，两侧各产生一个 gap，会把相邻按钮间距撑成两倍；
-   用负外边距各抵消半个间距，让展开的抽屉与「更多」按钮之间恰好保留一个间距。 */
+/* 「更多」「筛选」抽屉是按钮区最前面的 flex 项：展开时按钮区向左延伸，「更多」及其右侧按钮位置不动。
+   折叠态抽屉是零宽槽、两侧各产生一个 gap，用负外边距各抵消半个，保证按钮间距不变。 */
 .rlog-more-drawer:not(.expanded),
 .rlog-filter-drawer:not(.expanded) {
     margin-left: calc(var(--rlog-header-gap) / -2);
@@ -610,10 +653,8 @@
     display: block;
 }
 
-/* 标题旁「N隐藏」指示器 + 重置按钮：
-   透明无边框，只保留重置按钮自身的 hover 效果；
-   三段间距（标题→计数、计数→筛选、筛选→重置图标）视觉上保持一致：
-   计数左右各 5px 内边距参与间距计算，指示器左右内边距归零、内部 gap 补足差值（桌面 6px / 移动端 4px） */
+/* 标题旁「N隐藏」指示器 + 重置按钮：透明无边框，只保留重置按钮自身 hover。
+   间距靠计数左右各 5px 内边距参与计算，指示器内边距归零、gap 补足差值（桌面 6 / 移动 4）。 */
 .rlog-filter-indicator {
     display: inline-flex;
     align-items: center;
@@ -802,10 +843,8 @@
     box-shadow: inset 0 0 0 0 transparent;
 }
 
-/* 记录来源色变量（data-source 由 JS 写在记录根元素上）：
-   hover 左侧彩条与来源 dot 共用同一变量，调色只需改这里，两处自动一致。
-   下方 dot 规则里 var() 的第二参数是兜底色（仅当记录缺少 data-source 时才生效），
-   保持与这里同值即可，不需要单独调。 */
+/* 记录来源色变量（data-source 写在记录根元素上）：hover 彩条与来源 dot 共用，调色只改这里；
+   dot 规则里 var() 的第二参数是兜底色，保持同值即可。 */
 .rlog-record[data-source="native"] { --rlog-source-color: var(--rlog-source-native); } /* 原生来源色变量（hover 彩条与 dot 共用） */
 .rlog-record[data-source="plugin"] { --rlog-source-color: var(--rlog-source-plugin); } /* 插件来源色变量（hover 彩条与 dot 共用） */
 
@@ -816,16 +855,27 @@
     box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--rlog-source-color, #124e78) 90%, transparent); /* 记录标题栏 hover 彩条颜色（来源色 90% 透明度） */
 }
 
-/* 置顶记录：常驻复用 hover 效果（底色 + 来源色彩条），不新增图标/角标/特效 */
+/* 置顶记录：常驻底色 + 加粗的来源彩条（4px；普通行 hover 是 2px），不新增图标/角标/特效。
+   常驻底色 = 普通记录的 hover 底色；悬停换 --rlog-bg-record-pinned-hover（略暗/略亮一档，不超过标题栏）。
+   彩条用 inset 阴影画，不参与布局，文字与按钮位置不受影响。 */
 .rlog-record.rlog-pinned .rlog-record-header {
     background: var(--rlog-bg-record-hover);
-    box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--rlog-source-color, #124e78) 90%, transparent);
+    box-shadow:
+        inset 4px 0 0 0 color-mix(in srgb, var(--rlog-source-color, #124e78) 90%, transparent);
+}
+/* 置顶记录 hover：只换底色、彩条保持（选择器含 :hover，比常驻规则更具体） */
+.rlog-record.rlog-pinned .rlog-record-header:hover {
+    background: var(--rlog-bg-record-pinned-hover);
 }
 
 /* 移动端长按置顶重排期间的 hover 抑制：仅本次手势内覆盖 :hover，置顶记录常驻视觉不受影响 */
 #rlog-list.rlog-hover-suppress .rlog-record:not(.rlog-pinned) .rlog-record-header:hover {
     background: var(--rlog-bg-record);
     box-shadow: inset 0 0 0 0 transparent;
+}
+/* 置顶记录在抑制期间保持常驻底色（不让补位伪 hover 把它点亮一档） */
+#rlog-list.rlog-hover-suppress .rlog-record.rlog-pinned .rlog-record-header:hover {
+    background: var(--rlog-bg-record-hover);
 }
 #rlog-list.rlog-hover-suppress .rmsg-header:hover {
     background: var(--rlog-bg-msg);
@@ -842,12 +892,8 @@
     touch-action: pan-y; /* 允许触屏纵向滚动列表，长按静止才触发置顶 */
 }
 
-/* 角色名光学对齐微调（桌面端）：实测中心线与右侧信息项一致（差值≤0.8px 为字号固有），
-   但人眼观感略低——此前右侧四项各用 top:1px 压低作补偿，已移除；
-   现改为只把角色名抬高 1px（position: relative + top: -1px），
-   观感不合适时去掉这两行即可，右侧四项保持无偏移。
-   移动端实测 -1px 反而偏高（角色名字号 12px 与来源标签同号），
-   已在移动端媒体查询里把 top 重置为 0，调桌面/移动分开改这里和媒体查询两处 */
+/* 角色名光学对齐：桌面抬高 1px、移动端复位为 0（两处要一起改）。
+   早期给右侧四项加 top:1px 的补偿写法已移除，不要再用。 */
 .rlog-char-name {
     font-weight: 600;
     letter-spacing: 0.5px;
@@ -1063,10 +1109,8 @@
     align-items: center;
 }
 
-/* 等待回复时的透明占位：与状态标签共用同一槽位（同 min-width），
-   仅折叠时显示（沿用上方 .rlog-record.collapsed 规则），
-   回复到达后被 appendReplyToRecordDom 原位替换为状态标签，展开时同样隐藏。
-   visibility:hidden 保留布局宽度但不显示，也不进无障碍树。 */
+/* 等待回复的透明占位：与状态标签共用槽位宽度，仅折叠时显示、回复到达后被原位替换；
+   visibility:hidden 保留布局宽度、不进无障碍树。 */
 .rlog-reply-status-placeholder {
     visibility: hidden;
 }
@@ -1099,10 +1143,8 @@
     color: var(--rlog-text-strong);
 }
 
-/* ── 搜索模式状态：其他操作按钮用 visibility:hidden 保留宽度占位 ──
-   关键: 不用 display:none（会释放空间导致放大镜位置被推移），
-   而是隐藏但保留空间，让 actions-inner 宽度与普通状态完全一致，
-   放大镜按钮 (.rlog-search-btn) 因此保持在原位不动。 */
+/* 搜索模式下其他操作按钮用 visibility:hidden 保留宽度（不能用 display:none——会释放空间、
+   把放大镜位置推走），保证按钮区宽度与放大镜位置不变。 */
 .rlog-record.rlog-searching .rlog-msg-expand-btn,
 .rlog-record.rlog-searching .rlog-msg-collapse-btn,
 .rlog-record.rlog-searching .rlog-read-full-btn,
@@ -1126,12 +1168,8 @@
     position: relative;
 }
 
-/* 搜索框容器（无边框、无底色）
-   绝对定位从放大镜右边缘 (24px = 放大镜宽度，紧贴无间隙) 延伸到折叠/展开箭头右边缘：
-   right: -24px = 折叠箭头占位 (20px 宽 + 4px gap)，
-   使上下箭头右边缘与搜索框展开前折叠箭头的右边缘对齐，
-   消除右侧空余空间，避免输入框和计数被压缩得过窄。
-   不向左扩展 → 放大镜图标位置完全不变 */
+/* 搜索框容器：绝对定位从放大镜右缘（24px = 放大镜宽度，无间隙）延伸到折叠箭头右缘（right:-24px），
+   与展开前对齐且不向左扩展，放大镜位置不动。 */
 .rlog-search-box {
     display: flex;
     align-items: center;
@@ -1183,13 +1221,8 @@
     margin-left: 1px;
 }
 
-/* Font Awesome 图标在按钮内强制几何居中（兼容所有平台）：
-   不同浏览器/移动端平台对 Font Awesome 伪元素字形的行盒渲染存在差异
-   （基线位置、字形内白边不一致），导致 flex 居中时视觉上偏上/偏下。
-   关键：绝对定位必须直接作用于 ::before 伪元素（图标字形本体），
-   而不是包裹它的 <i>——因为 <i> 的行盒仍然受 line-height 和字形
-   渲染差异影响，盒子居中 ≠ 字形视觉居中。
-   将字形本体直接按按钮几何中心定位，彻底脱离行盒/基线/内白边影响。 */
+/* FA 图标几何居中：绝对定位必须落在 ::before（字形本体）上，不能放 <i>——<i> 的行盒仍受
+   line-height 与字形内白边影响，盒子居中 ≠ 字形居中。 */
 .rlog-search-prev i,
 .rlog-search-next i {
     position: relative; /* 作为 ::before 字形绝对定位的参考容器 */
@@ -1206,11 +1239,8 @@
     line-height: 1;
 }
 
-/* 搜索输入框容器（带底色圆角：输入框 + 计数共用底色）
-   弹性占满剩余空间，受 min/max 约束，空间不足时自动收缩。
-   max-width 220px：在容器空间充足时给输入框更大的可用宽度。
-   内部结构：透明输入框（弹性收缩）+ 计数（不收缩）→
-   数字变宽（如 100/100）时自然向左挤占输入框文字空间。 */
+/* 搜索输入框容器：弹性占满剩余空间（max-width 220px），内部为透明输入框 + 不收缩的计数，
+   计数变宽时自然挤压输入框。 */
 .rlog-search-input-wrap {
     flex: 1 1 auto;
     width: 140px;           /* flex-basis 基础宽度：空间充足时输入框区域的基础大小 */
@@ -1234,10 +1264,8 @@
     background: var(--rlog-search-bg-hover);
 }
 
-/* 搜索输入框（透明背景，融入容器底色；文字区域弹性收缩）
-   使用 !important 强制清除 input 的边框/outline/阴影/默认外观，
-   防止 ST 宿主页面全局样式（如 input:focus-visible）给 input 强加边框，
-   导致输入区域与计数之间出现细线。 */
+/* 搜索输入框：!important 强制清掉边框/outline/阴影/默认外观，防止 ST 全局
+   input:focus-visible 之类规则加边框、在它与计数之间出现细线。 */
 .rlog-search-input {
     flex: 1 1 auto;
     min-width: 0;           /* 可完全弹性收缩，计数字符变宽时优先让出 */
@@ -1263,13 +1291,8 @@
     color: var(--rlog-search-ph);
 }
 
-/* 匹配计数显示（如 3/18）
-   与外部操作按钮一致：同高，保持在水平中线上。
-   对齐方式：右对齐（justify-content: flex-end）→ 数字右侧始终贴着
-   wrapper 的 padding-right 边缘，右侧边距恒定不变；
-   短数字时 span 宽度 = 内容宽度（min-width:0），不浪费空间；
-   数字变宽（如 100/100）时 span 向左扩展，挤压输入框（弹性收缩），
-   右侧边距不受影响。 */
+/* 匹配计数（如 3/18）：与操作按钮同高、右对齐（数字右侧贴容器 padding-right，边距恒定），
+   数字变宽时向左挤压输入框。 */
 .rlog-search-count {
     font-size: 11px;
     font-family: inherit; /* 与其他面板文字一致，不使用等宽字体 */
@@ -1343,10 +1366,8 @@ mark.rlog-search-mark-current {
 /* 消息头部 */
 .rmsg-header {
     position: sticky;
-    /* 吸顶偏移 = 记录标题栏实际高度（--rlog-rec-h，由 JS 在渲染/显示/尺寸变化时实测写入）。
-       记录标题栏会因宽度变化换行变高（窄屏 3~4 行），写死 40px/36px 会导致消息标题
-       被记录标题遮挡、看起来"没吸住"；用变量跟随真实高度后，消息标题始终贴在
-       记录标题栏正下方，滚动仍由浏览器原生 sticky 完成。 */
+    /* 吸顶偏移 = 记录标题栏实测高度（--rlog-rec-h，由 JS 写入）：记录标题栏会因换行变高，
+       写死 40/36px 会让消息标题被遮住。 */
     top: var(--rlog-rec-h, 40px);
     z-index: 10;
     background: var(--rlog-bg-msg);
@@ -1376,11 +1397,8 @@ mark.rlog-search-mark-current {
 .rmsg-item.role-response .rmsg-header:hover { box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--rlog-role-response) 90%, transparent); }
 .rmsg-item.role-other .rmsg-header:hover { box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--rlog-role-other) 90%, transparent); }
 
-/* ── 快速置底/回顶跳转：目标标题栏轻微闪烁 ──
-   置底闪最后一条子消息标题栏；无按钮回顶（新消息回顶/折叠全部回顶/重开回顶）闪顶部记录的标题栏。
-   只闪一次，底色比 hover 略深一档（比 hover 明显、但仍属轻微视觉提示，不做警报式高亮）。
-   触发型动画：类由 JS 在点击置底按钮时动态添加（先移除+强制回流保证可重播），
-   animationend 后自动移除；面板隐藏时 hidePanel 也会清理，防止下次打开重播。 */
+/* 快速置底/回顶的标题栏闪烁：只闪一次，底色比 hover 深一档。
+   类由 JS 添加、animationend 后移除；面板隐藏时由 hidePanel 清理，防止下次打开重播。 */
 .rlog-record-header.rlog-flash-bottom,
 .rmsg-header.rlog-flash-bottom {
     animation: rlog-flash-bottom 0.9s ease-in-out;
@@ -1558,12 +1576,7 @@ mark.rlog-search-mark-current {
     animation: rlog-theme-breathe 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* ── 主题切换过渡 ──────────────────────────────────
-   仅大块结构元素（panel本身、header、record-body、rmsg-content）
-   保留 0.35s 颜色渐变过渡，其余小元素（badge、token 数字、角色标签等）
-   颜色瞬间切换，大幅降低移动端渲染压力。
-   缩放呼吸动画保持不动。
-   弹窗颜色也仅保留大块元素过渡。 */
+/* 主题切换过渡：只给大块结构元素保留 0.35s 颜色渐变，小元素瞬切（降低移动端渲染压力）。 */
 #rlog-panel,
 .rlog-panel-header,
 .rlog-record-header,
@@ -1933,8 +1946,7 @@ mark.rlog-search-mark-current {
 }
 
 /* ============================================================
-   Overlay 进度条 (自定义滚动条，视觉与交互分离)
-   适用于 .rmsg-content 消息内容区（仅含长文本的消息才需要）
+   Overlay 进度条（自定义滚动条，视觉与交互分离；仅 .rmsg-content 使用）
    ============================================================ */
 
 /* ── 触控区：透明悬于内容上方，不挤占空间 ─────────── */
@@ -2009,8 +2021,7 @@ mark.rlog-search-mark-current {
 }
 
 /* ============================================================
-   「查看全文」覆盖层 (明亮主题默认)
-   覆盖整个 #rlog-panel（含主标题栏），独立的 sticky 标题栏 + 可滚动内容区
+   「查看全文」覆盖层（覆盖 #rlog-panel，独立 sticky 标题栏 + 可滚动内容区）
    ============================================================ */
 
 /* ── 覆盖层容器 ─────────────────────────────── */
@@ -2063,11 +2074,8 @@ mark.rlog-search-mark-current {
     flex-shrink: 0;
 }
 
-/* ── 格式切换按钮（等宽字体花括号 {} 文本，替代 FA brackets-curly pro 图标） ──
-   与其它覆盖层按钮同尺寸（20×20），默认（整理格式）无特殊样式；
-   切换为原始格式（.raw）时图标显示重点色 + 持续 hover 底色（同「更多/筛选」抽屉展开态），让非默认格式一眼可辨。
-   用等宽字体写 {} 而不是 SVG：字体选 Consolas 系列（Windows 标配），与面板正文 Segoe UI 的图标风格搭配；
-   等宽字体最多只有 700 字重，调 900 也不会更粗，所以用 -webkit-text-stroke 给字形描边真正加粗 */
+/* 格式切换按钮（等宽字体 {}）：非默认格式用重点色 + 常驻 hover 底色。
+   用字体而非 SVG 是为了贴正文风格；等宽字体最粗只有 700，故用 -webkit-text-stroke 加粗。 */
 .rlog-read-format-btn {
     color: var(--rlog-read-btn);
     font-family: Consolas, 'Cascadia Mono', ui-monospace, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace;
@@ -2156,10 +2164,7 @@ mark.rlog-search-mark-current {
     position: relative;
 }
 
-/* ── 底部防截断长条 ──────────────────────────────
-   与主面板底部一致：不画实线，保留细边框由外层 #rlog-panel 的 border 提供；
-   此条为 6px 透明留白（对应主面板 .rlog-panel-body 的 padding-bottom: 6px），
-   避免文本滚动到底部时被边框生硬截断 */
+/* 底部防截断长条：6px 透明留白（对应面板 body 的 padding-bottom），滚到底时不至于被边框硬截。 */
 .rlog-read-footer {
     flex-shrink: 0;
     height: 6px;
@@ -2296,10 +2301,8 @@ mark.rlog-search-mark-current {
     padding: 6px 0;
 }
 
-/* 滚动提示箭头：仅作为滚动状态提示，不参与交互，不占固定高度。
-   默认隐藏，列表真的可滚/仍可滚时由 JS 加 .rlog-pref-arrow-visible 显示。
-   用带前缀的更高优先级选择器覆盖影子内 FA 固壳的 .fa-solid{display:inline-block}，
-   否则箭头会始终显示（FA 规则更靠后，同优先级下会压过这里的 display:none）。 */
+/* 滚动提示箭头：仅状态提示、不参与交互、不占固定高度，由 JS 加 .rlog-pref-arrow-visible 显示。
+   选择器带前缀提高优先级，否则会输给影子内 FA 固壳的 .fa-solid{display:inline-block}。 */
 .rlog-pref-list-wrap .rlog-pref-scroll {
     position: absolute;
     left: 50%;
@@ -2339,11 +2342,7 @@ mark.rlog-search-mark-current {
     user-select: none;
 }
 
-/* Toggle 开关：类似播放器/工具栏控件，右对齐，相对整个设置项（标题+说明）垂直居中。
-   轨道是 1px 细线（非粗实线），滑块是实心小方块（约 2px 小圆角）。
-   关闭：滑块在左、使用现有普通文字色，轨道用次级文字色；
-   开启：滑块滑到右、使用主题色，轨道用普通文字色（不变成醒目的主题色）。
-   整体高度与设置项文字行高相仿。 */
+/* Toggle 开关：细线轨道 + 实心方块滑块；关闭＝滑块在左 + 普通文字色，开启＝滑块在右 + 主题色。 */
 .rlog-toggle {
     position: relative;
     flex-shrink: 0;
@@ -2394,52 +2393,85 @@ mark.rlog-search-mark-current {
 
 /* ════════════════════════════════════════════════════════════
    13. 浮标（收起面板后的小型插件入口）
-   ── 挂在影子根内、与 #rlog-panel 平级（不在面板内），继承不到 #rlog-panel 上的变量，
-      所以配色改由上方「主题颜色变量总表」里挂 #rlog-shadow-host（影子宿主）的变量提供，
-      宿主自定义属性跨影子边界继承给浮标，从而仍统一走变量总表。
-   ── 外观：小型圆角方块，只用图标（fa-book，复用插件列表书图标），
-      背景=跟随 ST 引用文本色（--SmartThemeQuoteColor）降透、book=白色、边框=与背景同色实心（引用色）；
-      不加额外投影/渐变/计数/状态文字。移动端尺寸在末尾「移动端适配」缩到 32×32。
-   ── 显隐：默认 display:none；JS 在收起面板时加 .rlog-badge-active 显示，恢复时移除。
+   ── 结构：独立 light DOM 宿主 #rlog-badge-host（供第三方收纳识别）+ 自己的 shadow root，
+      可见视觉是影子内的 .rlog-badge-visual；宿主只承担定位/尺寸（由 index.js 写 inline）。
+   ── 生效方式：本文件会被复制一份进浮标影子根，所以本区规则直接生效——调浮标外观只改本区，
+      颜色改顶部 #rlog-badge-host 两块。
+   ── 分层：圆盘（底色 + 渐变）画在 ::before 上，图标是 <i>；缩放只作用于圆盘层（原因见下方注释）。
+   ── 动效：悬停放大 + 整套换色、按下缩小 0.95，均 0.2s；浮标不接极简开关（无滚动、元素极少）。
+   ── 尺寸：宽高由 getBadgeSize()（桌面 34 / 移动 30）写成 inline，本区只调图标字号。
    ════════════════════════════════════════════════════════════ */
-.rlog-badge {
-    position: fixed;
-    display: none;
-    width: 36px;
-    height: 36px;
-    border-radius: 6px;
+.rlog-badge-visual {
+    position: absolute;
+    inset: 0;
+    display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--rlog-badge-bg);
-    border: 1px solid var(--rlog-badge-border);
     color: var(--rlog-badge-icon);
-    font-size: 16px; /* book 图标大小 */
+    font-size: 18px; /* 图标大小 */
     cursor: pointer;
-    z-index: 2999; /* 高于普通内容(聊天区 30)，低于 ST 顶部设置抽屉(3005)：打开世界书/扩展/预设等不遮挡 */
     user-select: none;
     -webkit-user-select: none;
+    /* 图标层只过渡图标色（悬停换套 / ST 主题切换）；圆盘的过渡在下面 ::before 上 */
+    transition: color 0.2s ease;
+    /* 常驻合成层：分数 DPR（如 Windows 125%）下，合成层开关会让字形换一次像素吸附相位，
+       悬停/按下时表现为「又抖又糊一下」；常驻后三态栅格化一致，34px 浮标开销可忽略。 */
+    will-change: transform;
 }
-.rlog-badge.rlog-badge-active {
-    display: flex;
+
+/* 圆盘层（底色 + 渐变）：只有这一层参与缩放。缩放字形会走合成器位图缩放路径，
+   观感上「图标比背景慢半拍」；把缩放限制在无字形的圆盘层即可消除。 */
+.rlog-badge-visual::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: none;
+    background-color: var(--rlog-badge-bg); /* 渐变之下的底色（渐变不可用时仍有底色，不至于全透明） */
+    background-image: linear-gradient(145deg, var(--rlog-badge-grad-from) 0%, var(--rlog-badge-grad-to) 100%);
+    z-index: 0;
+    /* 圆盘缩放（悬停放大 / 按下缩小）+ 换色（悬停换套 / ST 主题切换：底色、渐变两端色标），均 0.2s */
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+                background-color 0.2s ease,
+                --rlog-badge-grad-from 0.2s ease,
+                --rlog-badge-grad-to 0.2s ease;
+}
+
+/* 图标：叠在圆盘层之上，且**不参与缩放**（缩放只写在圆盘层上） */
+.rlog-badge-visual i {
+    position: relative;
+    z-index: 1;
+}
+
+/* 鼠标悬停：圆盘层轻微放大（图标不动，所以不会有「图标慢半拍」）；
+   配色由顶部总表的「悬停配色」块提供（宿主 :hover 换 4 个变量），本区只管缩放与过渡。
+   数值可调：1.02 是放大档位（用户实机选定：再大就与按下缩小的观感冲突），一般 1.02~1.04。 */
+@media (hover: hover) {
+    .rlog-badge-visual:hover::before {
+        transform: scale(1.02);
+    }
+}
+
+/* 按下：圆盘层缩小（图标不动）——写在 :hover 之后，按住时以 0.95 为准，按感保持 */
+.rlog-badge-visual:active::before {
+    transform: scale(0.95);
 }
 
 /* ════════════════════════════════════════════════════════════
-   14. 置顶/取消置顶提示 toast
-   ── 挂在 #rlog-panel 内（面板顶部正中），短暂显示、点击可提前消除。
-   ── 极简模式由 :host(.rlog-minimal) 的 `transition:none!important` 统一关掉淡入淡出。
+   14. 置顶/取消置顶提示 toast（挂 #rlog-panel 内，短暂显示、点击可提前消除）
+   ── 极简模式由 :host(.rlog-minimal) 统一关掉淡入淡出。
    ════════════════════════════════════════════════════════════ */
 .rlog-pin-toast {
     position: absolute;
     top: 0;
     left: 50%;
-    transform: translate(-50%, -8px);
+    transform: translate(-50%, -8px); /* 未激活：静止位置上方 8px，淡入时向下落一段 */
     max-width: 80%;
-    padding: 8px 14px;
+    padding: 4px 8px; /* 内边距 */
     border-radius: 4px;
     background: var(--rlog-pin-toast-bg);
     border: 1px solid var(--rlog-pin-toast-border);
     color: var(--rlog-pin-toast-text);
-    box-shadow: var(--rlog-pin-toast-shadow);
     font-size: 12px;
     line-height: 1.4;
     text-align: center;
@@ -2451,17 +2483,14 @@ mark.rlog-search-mark-current {
 }
 .rlog-pin-toast.rlog-pin-toast-active {
     opacity: 1;
-    transform: translate(-50%, 8px);
+    /* 静止位置：外框在标题行垂直居中（11px = 标题行中心 24.5px − 框高一半 13.4px；改内边距要同步调） */
+    transform: translate(-50%, 11px);
     pointer-events: auto;
     cursor: pointer;
 }
 
 /* ============================================================
-   移动端适配（唯一断点：max-width: 768px）
-   所有移动端规则集中在此，改断点只改这一处。
-   说明：原「缩短主题切换过渡/动画时长」两条规则已移除——
-   它们原本位于 0.35s 简写声明之前，实际从未生效；
-   若确需移动端更快的主题过渡，应在下方用完整 transition 声明重写。
+   移动端适配（唯一断点：max-width: 768px）——所有移动端规则集中在此，改断点只改这一处。
    ============================================================ */
 @media (max-width: 768px) {
     #rlog-panel {
@@ -2474,13 +2503,11 @@ mark.rlog-search-mark-current {
     }
     .rlog-pin-toast {
         font-size: 11px;
-        padding: 7px 12px;
+        padding: 3px 6px; /* 移动端toast内边距 */
     }
-    /* 移动端浮标（≤768px）：与桌面 36×36 同步缩到 32×32，book 图标相应缩小 */
-    .rlog-badge {
-        width: 32px;
-        height: 32px;
-        font-size: 14px;
+    /* 移动端浮标（≤768px）：宿主尺寸由 index.js getBadgeSize() 同步缩到 30×30，这里只缩图标 */
+    .rlog-badge-visual {
+        font-size: 15px; /* 图标大小（与桌面 18/34 同比例） */
     }
     .rlog-panel-header {
         padding: 8px 10px;
@@ -2616,22 +2643,15 @@ mark.rlog-search-mark-current {
         border-width: 0 0 10px 10px;
     }
 
-    /* 主题切换临时禁用过渡（仅移动端）：
-       大量展开消息时，数百个元素同时做 0.35s 颜色渐变会明显卡顿。
-       JS 在主题切换前添加此 class，双 RAF 后移除。
-       桌面端保留渐变特效，不应用此规则。 */
+    /* 主题切换临时禁用过渡（仅移动端）：大量展开消息时数百元素同时渐变会卡顿，
+       JS 在切换前加类、双 RAF 后移除；桌面保留渐变。 */
     .rlog-theme-transitioning *,
     .rlog-theme-transitioning {
         transition: none !important;
     }
 
-    /* 「更多」「筛选」抽屉禁用过渡动画（仅移动端）：
-       抽屉展开时 max-width 0→360/440px 的 0.3s 过渡会持续改变面板头部 flex 布局，
-       移动端 header 可换行时导致面板 body 高度连续变化，
-       数百个 sticky 消息标题（.rmsg-header）被迫逐帧重排，造成明显卡顿。
-       禁用过渡后展开/收起一次性完成，仅触发一次 reflow，响应更流畅。
-       桌面端保留原有横向滑出动画，不受影响。
-       保持原有显示方式（行内展开），仅禁用过渡。 */
+    /* 抽屉禁用过渡（仅移动端）：max-width 过渡会持续改变 header 的 flex 布局，
+       换行时导致数百个 sticky 消息标题逐帧重排；禁用后只剩一次 reflow，桌面保留滑出动画。 */
     .rlog-more-drawer,
     .rlog-filter-drawer {
         transition: none;
@@ -2737,11 +2757,8 @@ mark.rlog-search-mark-current {
     }
 
     /* ── 移动端全屏（偏好设置） ─────────────────────── */
-    /* 开启「移动端全屏」偏好后：面板铺满整个移动端视口。
-       - 展开态用 top/left/宽高 100vw/100vh 让面板占满整屏、内容区照常滚动；
-       - 用 `:not(.rlog-window-collapsed)` 只在展开态套高度：折叠后仍只显示标题栏，行为不变；
-       - `!important` 用于压过折叠/拖拽/缩放写在 JS 行内样式里的 top/left/width/height，
-         确保打开即全屏、折叠后再展开也回到全屏；桌面端因断点隔离不受影响。 */
+    /* 移动端全屏偏好：展开态用 top/left/宽高 100vw/100vh 铺满，:not(.rlog-window-collapsed)
+       只在展开态套高度；!important 用于压过 JS 写在行内样式里的 top/left/width/height。 */
     #rlog-panel.rlog-mobile-fullscreen {
         top: 0 !important;
         left: 0 !important;
