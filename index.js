@@ -60,22 +60,24 @@ const STORAGE_PREF_CLICK_OUTSIDE = `${PLUGIN_KEY}_prefClickOutside`;  /* 偏好�
 const STORAGE_PREF_FILTER_PERSIST = `${PLUGIN_KEY}_prefFilterPersist`; /* 偏好：筛选状态持久化（已实现：开启后跨页面保留筛选状态） */
 const STORAGE_PREF_MINIMAL = `${PLUGIN_KEY}_prefMinimal`;            /* 偏好：极简模式（已实现：开启后去掉过渡/动画/平滑滚动/闪烁/浮层虚化） */
 const STORAGE_PREF_BADGE_DEFAULT = `${PLUGIN_KEY}_prefBadgeDefault`; /* 偏好：浮标默认入口（已实现：开启后插件启动默认显示浮标，右上角默认位置） */
+const STORAGE_PREF_FOLLOW_ST_THEME = `${PLUGIN_KEY}_prefFollowStTheme`; /* 偏好：昼夜模式跟随 ST 主题（已实现：开启后主面板亮暗自动跟随 ST 主题） */
 const STORAGE_FILTER_STATE_KEY = `${PLUGIN_KEY}_filterState`;        /* 持久化的筛选状态对象（仅当「筛选状态持久化」偏好开启时读写） */
 const NATIVE_INTENT_WINDOW_MS = 5000;
-const BADGE_SIZE = 36;               /* 浮标边长(px)：桌面端 36×36（移动端在媒体查询里可缩到 32） */
+const BADGE_SIZE = 34;               /* 浮标边长(px)：桌面端 34×34 */
+const BADGE_SIZE_MOBILE = 30;        /* 浮标边长(px)：移动端（≤768px）30×30；桌面/移动由 getBadgeSize() 按断点返回 */
 const BADGE_DRAG_THRESHOLD = 5;      /* 浮标拖动判定阈值(px)：位移超过该值视为拖动，否则视为点击恢复面板 */
 const BADGE_DEFAULT_MARGIN_RIGHT = 16; /* 浮标默认位置距视口右缘的距离(px)：「浮标默认入口」开启时启动默认位置 */
 const BADGE_DEFAULT_MARGIN_TOP = 12;  /* 浮标默认位置在 ST 顶部设置栏下缘往下的距离(px) */
 const LONG_PRESS_MS = 550;            /* 长按判定阈值(ms)：按下超过此时间且移动未超过容差视为长按 */
 const LONG_PRESS_MOVE_TOLERANCE = 8;  /* 长按移动容差(px)：按下后位移超过该值取消长按 */
 const PIN_TOAST_DURATION_MS = 1800;   /* 置顶/取消置顶提示自动消失时间(ms) */
+const ST_THEME_DARK_LUMINANCE = 0.5;  /* ST 主题背景色相对感知亮度低于该值视为深色主题（浮标改用浅色一套） */
 
 /* 影子内 FA 固壳：仅插件实际使用的 33 个实心图标（content 取自 ST 现版 fontawesome.min.css 6.5.2，非猜测）
    新增图标时在此补一行「图标名: '\\fXXX'」即可 */
 const FA_SOLID_CONTENT = {
     'arrow-down': '\\f063',
     'arrow-up': '\\f062',
-    'book': '\\f02d',
     'check': '\\f00c',
     'chevron-down': '\\f078',
     'chevron-right': '\\f054',
@@ -106,6 +108,7 @@ const FA_SOLID_CONTENT = {
     'vial': '\\f492',
     'xmark': '\\f00d',
     'caret-down': '\\f0d7',
+    'clock-rotate-left': '\\f1da',
 };
 
 /* number: 当前生效的最大记录数上限，从 localStorage 加载或使用默认值 */
@@ -209,13 +212,24 @@ let badgeEl = null;
    document 查找不到，仅供 __RLogApi.getBadgeVisualEl() 等测试辅助使用。 */
 let badgeVisualEl = null;
 
+/* string|null: style.css 规则序列化结果缓存（面板与浮标两个影子根各要一份 <style> 节点，
+   规则文本只序列化一次；null 表示尚未构建过） */
+let selfCssTextCache = null;
+
 /* {left,top}|null: 浮标会话内位置（浮标左上角坐标）。
-   首次收起记录点击座标，拖动后更新，再次收起复用；页面刷新/重新初始化时随模块重载自动清空。 */
+   首次收起记录点击坐标，拖动后更新，再次收起复用；页面刷新/重新初始化时随模块重载自动清空。 */
 let badgePos = null;
 
 /* boolean: 是否拦截「点击浮标恢复面板」后浏览器派发的原生 click（一次性标记）。
    浮标隐藏、面板出现在同一坐标时，该 click 会 hit-test 到面板标题栏按钮，可能误开抽屉。 */
 let badgeSuppressNextClick = false;
+
+/* boolean: ST 当前是否深色主题（浮标配色取其反：深色 ST → 浅色浮标）。
+   由 syncBadgeTheme() 按 ST 主题背景色亮度判定并维护，判定结果未变时不重复动浮标。 */
+let stThemeIsDark = false;
+
+/* MutationObserver|null: 监听 <html> 的 style 属性变化以感知 ST 主题切换（见 initBadgeThemeSync） */
+let badgeThemeObserver = null;
 
 /* HTMLElement|null: 扩展菜单中的按钮 */
 let toggleBtn = null;
@@ -284,19 +298,8 @@ let iframeHooksInstalled = false;
 /* number: 递增的请求捕获编号，用于把回复精确挂回对应记录 */
 let captureSeq = 0;
 
-/* 尚未挂载到记录的回复待办区（key: captureId）
-   value: {
-   startTime,   开始追踪时间（Date.now()）
-   timer,       超时定时器 id（超时 → Timeout 标记）
-   expireTimer, 终态后短暂保留的清理定时器 id（记录尚未建成时等待挂载）
-   status,      终态：'succeed' | 'fail' | 'timeout'
-   content,     已累积的正文文本
-   reasoning,   已累积的思考文本（reasoning/thinking/thought）
-   failReason,  失败/超时原因（悬停提示用）
-   time,        终态时间（格式同记录 timestamp）
-   reader,      流读取器（超时/清理时 cancel 释放）
-   finished,    是否已终态（避免重复 finalize）
-   } */
+/* 尚未挂载到记录的回复待办区（key: captureId）：{ startTime, timer, expireTimer, status,
+   content, reasoning, failReason, time, reader, finished }，记录建成后由 consumePendingReply 消费。 */
 const pendingReplies = new Map();
 
 /* string|null: 上一次记录的 messages 指纹，用于去重 */
@@ -320,14 +323,15 @@ let contentPreviewEnabled = false;
 /* boolean|null: 强制覆盖内容预览开关（用于引导程序演示） */
 let forcePreviewState = null;
 
-/* @type {object} 偏好设置状态（5 项，默认全关；持久化到 localStorage）
-   五项偏好「浮标默认入口」「移动端全屏」「点击面板外关闭」「筛选状态持久化」「极简模式」均已接入实际行为。 */
+/* @type {object} 偏好设置状态（6 项，默认全关；持久化到 localStorage）
+   六项偏好「浮标默认入口」「昼夜模式跟随 ST 主题」「移动端全屏」「点击面板外关闭」「筛选状态持久化」「极简模式」均已接入实际行为。 */
 let preferences = {
-    badgeDefault: false,  /* boolean: 浮标默认入口（开启后插件启动默认显示浮标，右上角默认位置；关闭面板/最小化时浮标回到 badgePos） */
-    mobileFull: false,    /* boolean: 手机端全屏（移动端打开面板自动铺满全屏） */
-    clickOutside: false,  /* boolean: 点击插件面板外关闭整个面板（双端通用，全屏时自然不生效） */
-    filterPersist: false, /* boolean: 筛选状态持久化（开启后跨页面保留筛选状态；关闭时不改动当前筛选） */
-    minimal: false,       /* boolean: 极简模式（开启后去掉过渡/动画/平滑滚动/闪烁/浮层虚化，保留状态反馈与引导动效） */
+    badgeDefault: false,   /* boolean: 浮标默认入口（开启后插件启动默认显示浮标，右上角默认位置；关闭面板/最小化时浮标回到 badgePos） */
+    followStTheme: false,  /* boolean: 昼夜模式跟随 ST 主题（开启后主面板亮暗自动跟随 ST 主题，手动昼/夜按钮不生效；与浮标配色互不相干） */
+    mobileFull: false,     /* boolean: 手机端全屏（移动端打开面板自动铺满全屏） */
+    clickOutside: false,   /* boolean: 点击插件面板外关闭整个面板（双端通用，全屏时自然不生效） */
+    filterPersist: false,  /* boolean: 筛选状态持久化（开启后跨页面保留筛选状态；关闭时不改动当前筛选） */
+    minimal: false,        /* boolean: 极简模式（开启后去掉过渡/动画/平滑滚动/闪烁/浮层虚化，保留状态反馈与引导动效） */
 };
 
 /* HTMLElement|null: 偏好设置浮层（遮罩 + 面板）DOM 元素 */
@@ -336,23 +340,19 @@ let prefOverlayEl = null;
 /* HTMLElement|null: 偏好设置「更多」抽屉入口按钮（用于切换心形图标态） */
 let prefBtnEl = null;
 
+/* MutationObserver|null: 监听 <html> 的 style 属性变化，感知 ST 主题切换以同步面板主题
+   （仅「昼夜模式跟随 ST 主题」开启时挂载；浮标有自己独立的同名观察者，两者互不共用、互不影响） */
+let panelThemeObserver = null;
+
 /* @type {object|null} 当前搜索状态（同一时间仅一条记录可搜索）
-   结构: { recordIndex, keyword, matches, currentIdx, searchEl }
-   - recordIndex: 正在搜索的记录索引
-   - keyword: 当前搜索关键词（用于判断是否需重新搜索）
-   - matches: Array<{ msgIdx, start, end }> 所有匹配位置
-   - currentIdx: 当前高亮的是第几个匹配（-1 表示无匹配）
-   - searchEl: 搜索框容器 DOM 元素 */
+   { recordIndex, keyword, matches: [{msgIdx, start, end}], currentIdx, searchEl } */
 let searchState = null;
 
 /* number|null: 搜索输入 debounce 定时器 ID */
 let searchDebounceTimer = null;
 
-/* 筛选状态（会话级内存态：页面存活期内关面板/折叠窗口保留，刷新即重置）
-   结构: { source: {native, plugin}, role: {system, user, assistant, other},
-           model: {gemini, claude, deepseek, other} }
-   默认全开 = 不筛选；任一项为 false 表示「隐藏该分类」。
-   来源/模型控制整条记录的显隐；角色控制记录内部子消息（含回复伪消息）的显隐。 */
+/* 筛选状态（会话级内存态，刷新重置）：{ source, role, model } 三组布尔，默认全开＝不筛选，
+   任一项 false 表示隐藏该分类；来源/模型控制整条记录，角色控制记录内子消息。 */
 let filterState = {
     source: { native: true, plugin: true },
     role: { system: true, user: true, assistant: true, other: true },
@@ -379,11 +379,8 @@ let readFullFormat = 'formatted';
 
 /* ── 工具函数 ─────────────────────────── */
 
-/* 从模型名称中提取「家族」标识
-   同一家族的模型共享分词器（如 gemini-3.1-pro-preview 和 gemini-3.6-flash 都属 gemini 家族）。
-   匹配逻辑参照 ST tokenizers.js 中 getTokenizerModel() 的模型名匹配规则。
-   @param {string} modelName 模型名称
-   @returns {string} 家族标识，无法识别时返回原始名称的小写 */
+/* 从模型名提取「家族」标识（同家族共享分词器），匹配规则参照 ST tokenizers.js 的 getTokenizerModel()。
+   @param {string} modelName @returns {string} 家族标识，无法识别时返回原名小写 */
 function extractModelFamily(modelName) {
     if (!modelName || modelName === '未知模型') return '';
     const m = modelName.toLowerCase();
@@ -407,21 +404,15 @@ function extractModelFamily(modelName) {
     return m;
 }
 
-/* 判断两个模型名是否属于同一家族（共享分词器）
-   只要能被 extractModelFamily 识别为同一家族即返回 true
-   @param {string} modelA 模型名 A（来自请求体）
-   @param {string} modelB 模型名 B（来自 ST 主 API）
-   @returns {boolean} 是否同家族 */
+/* 两个模型名是否同家族（按 extractModelFamily 判定、共享分词器）
+   @param {string} modelA @param {string} modelB @returns {boolean} */
 function isSameModelFamily(modelA, modelB) {
     if (!modelA || modelA === '未知模型' || !modelB) return true; /* 无法判断时默认认为兼容 */
     return extractModelFamily(modelA) === extractModelFamily(modelB);
 }
 
-/* 使用 ST 原生分词器为消息列表异步计算 Token 数量
-   优先使用 ST context 暴露的 getTokenCountAsync，不可用时降级为字节估算
-   逐条异步计算，结果直接写回消息对象的 tokens 字段
-   @param {Array} messages 消息列表，每条消息需要有 content 字段
-   @param {string} modelName 请求中提取的模型名，用于对比主 API 模型判断分词器兼容性 */
+/* 用 ST 原生分词器异步算 Token 并写回 messages[i].tokens（不可用时降级字节估算）
+   @param {Array} messages @param {string} modelName 用于判断分词器兼容性 */
 async function computeTokensForMessages(messages, modelName) {
     const ctx = window.SillyTavern && typeof window.SillyTavern.getContext === 'function'
         ? window.SillyTavern.getContext()
@@ -464,10 +455,8 @@ async function computeTokensForMessages(messages, modelName) {
     }
 }
 
-/* 从 AI 请求体中提取模型名称
-   不同 API 格式的模型字段名称不同，按优先级尝试提取
-   @param {object} body 解析后的请求体 JSON
-   @returns {string} 模型名称，提取不到则返回 '未知模型' */
+/* 从请求体提取模型名（各 API 字段名不同）
+   @param {object} body @returns {string} 提取不到返回 未知模型 */
 function extractModelName(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return '未知模型';
 
@@ -530,12 +519,8 @@ function getRoleLabel(role) {
     return map[role] || role;
 }
 
-/* 提取消息内容开头的预览文字（用于在角色标签旁边显示提示）
-   原样保留所有文本（包括 XML 标签），跨行取内容，尽可能多地在预览中显示。
-   换行符替换为空格（CSS white-space: nowrap 下单行显示）。
-   JS 端截断到 200 字符作为安全上限，实际视觉省略由 CSS 根据面板宽度动态处理。
-   @param {string} content 消息完整内容
-   @returns {string} 预览文字，内容为空时返回空字符串 */
+/* 取消息开头预览文字：原样保留文本、换行转空格、JS 端截断 200 字符（视觉省略交给 CSS）
+   @param {string} content @returns {string} */
 function getContentPreview(content) {
     if (!content || typeof content !== 'string') return '';
     /* 将换行符替换为空格，然后去掉首尾空白 */
@@ -550,6 +535,44 @@ function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+}
+
+/* 解析颜色字符串的 RGB 通道：只覆盖 ST 主题色会用到的写法（#rgb / #rrggbb / rgb() / rgba()）；
+   alpha 不参与解析——主题明暗只看颜色方向。
+   @param {string} color @returns {{r,g,b}|null} */
+function parseCssColorChannels(color) {
+    if (!color) return null;
+    const text = String(color).trim();
+    const fn = text.match(/^rgba?\(([^)]+)\)$/i);
+    if (fn) {
+        const parts = fn[1].split(/[\s,/]+/).filter(Boolean);
+        if (parts.length < 3) return null;
+        const rgb = parts.slice(0, 3).map(part => parseFloat(part));
+        if (rgb.some(num => Number.isNaN(num))) return null;
+        return { r: rgb[0], g: rgb[1], b: rgb[2] };
+    }
+    const hex = text.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (hex) {
+        const body = hex[1].length === 3
+            ? hex[1].split('').map(c => c + c).join('')
+            : hex[1];
+        return {
+            r: parseInt(body.slice(0, 2), 16),
+            g: parseInt(body.slice(2, 4), 16),
+            b: parseInt(body.slice(4, 6), 16),
+        };
+    }
+    return null;
+}
+
+/* WCAG 相对感知亮度（sRGB 线性化后加权），用于判断主题底色明暗
+   @param {number} r @param {number} g @param {number} b @returns {number} */
+function relativeLuminance(r, g, b) {
+    const toLinear = (value) => {
+        const s = Math.min(Math.max(value, 0), 255) / 255;
+        return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b);
 }
 
 /* ── AI 请求体结构验证 ───────────────────── */
@@ -636,14 +659,8 @@ function isGeminiContentObject(obj) {
     });
 }
 
-/* 判断请求体是否为 AI API 生成请求。
-   结构识别为主，URL 和生成参数作为辅助过滤，用于排除加载界面/进入对话时的 ST 内部接口。
-   
-   优化：检查顺序从最便宜到最昂贵排列——
-   1. 基础类型校验（免费）
-   2. URL 排除检查（字符串匹配）
-   3. 顶层 key 扫描（hasGenerationRequestHints + generationUrl）
-   4. 数组遍历 + 逐元素校验（最贵，仅在顶层特征匹配后才执行） */
+/* 判断请求体是否为 AI 生成请求：结构识别为主，URL 与生成参数辅助过滤（排除 ST 内部接口）。
+   检查顺序由便宜到昂贵：类型校验 → URL 排除 → 顶层 key 扫描 → 数组逐元素校验。 */
 function isAiRequestBody(body, requestUrl) {
     /* 便宜检查 1：基础类型 */
     if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
@@ -1026,10 +1043,8 @@ function parseFetchRequestBody(json) {
     return messages;
 }
 
-/* 后台异步处理已捕获的 AI 请求体：解析消息、计算 token、存入记录。
-   此函数与 fetch 请求的发送完全解耦，不阻塞 originalFetch 的调用。
-   @param {object} body 已解析的请求体 JSON
-   @param {string} requestUrl 请求 URL */
+/* 后台异步处理已捕获的请求体（解析消息、算 token、存记录），与 fetch 发送解耦、不阻塞网络
+   @param {object} body @param {string} requestUrl */
 async function processCapturedBody(body, requestUrl, captureId) {
     /* 严格请求体验证：先排除 ST 加载/切换对话等内部接口，再识别真实生成请求 */
     if (!body || !isAiRequestBody(body, requestUrl)) return;
@@ -1054,22 +1069,11 @@ function isRequestLike(input) {
     return !!(input && typeof input === 'object' && typeof input.clone === 'function' && typeof input.text === 'function');
 }
 
-/* 构造一个 fetch 拦截包装：主窗口与同源 iframe 共用同一套捕获逻辑。
-   每个 realm（窗口）用独立的重入保护标记；包装内部始终调用该 realm 自己的原始 fetch，
-   避免把 iframe realm 的 Request 对象传给主窗口 fetch（跨 realm 会抛错）。
-
-   快速通道（early return），避免对每一个 JSON POST 请求都做完整解析：
-   1. 非 POST/PUT/PATCH 请求直接跳过
-   2. URL path 明确属于 ST 内部 API (/api/, /assets/, /backgrounds/) 且不匹配 AI 路径，直接跳过
-   3. 仅对通过快速筛选的请求才解析 body
-
-   锁策略：realmHookInFlight 仅保护 body 的同步捕获（init.body 读取），
-   持有时长极短（微秒级）；originalFetch 在锁释放后立即调用，
-   分词计算和 addRecord 通过 Promise 链异步执行，不阻塞实际网络请求的发出。
-
-   @param {Window} realmWindow 被包装的窗口（主窗口或 iframe.contentWindow）
-   @param {Function} getOriginalFetch () => Function 返回该 realm 当前原始 fetch
-   @returns {Function} 包装后的 fetch */
+/* 构造 fetch 拦截包装（主窗口与同源 iframe 共用）：每个 realm 用独立重入标记，包装内部始终调用
+   该 realm 自己的原始 fetch（跨 realm 传 Request 会抛错）。快速通道按「非写请求 → ST 内部 API →
+   才解析 body」逐级过滤；锁只保护 body 的同步捕获，originalFetch 在锁释放后立即调用，
+   分词与 addRecord 走异步，不阻塞网络请求发出。
+   @param {Window} realmWindow @param {Function} getOriginalFetch @returns {Function} */
 function createFetchHook(realmWindow, getOriginalFetch) {
     let realmHookInFlight = false; /* 该 realm 的重入保护（防其他包装形成闭环） */
     return async function hookedFetch(input, init) {
@@ -1180,11 +1184,9 @@ function installFetchHook() {
     console.debug(`[${PLUGIN_KEY}] fetch 拦截已启用（网络层统一拦截模式）`);
 }
 
-/* 给单个 iframe 安装 fetch 包装（仅同源）。
-   跨域 iframe 无法访问 contentWindow，直接跳过（同源判定用 try/catch）；
-   已安装且未被替换的窗口跳过，避免重复包装破坏该 realm 原有的 fetch 包装链。
-   @param {HTMLIFrameElement} iframe
-   @returns {boolean} 是否已安装（含已安装无需重装的场景） */
+/* 给单个同源 iframe 安装 fetch 包装：跨域拿不到 contentWindow 直接跳过；已装且未被替换则跳过，
+   避免破坏该 realm 的包装链。
+   @param {HTMLIFrameElement} iframe @returns {boolean} 是否已安装 */
 function hookIframeFetch(iframe) {
     if (!iframe) return false;
     if (!iframe.contentWindow) {
@@ -1275,13 +1277,9 @@ function getReplyStatusLabel(status) {
 /* 回复状态标签槽位宽度（px）缓存：由 getReplyStatusMaxWidth 实测一次，供占位/标签共用 */
 let replyStatusMaxWidth = null;
 
-/* 实测三个状态标签文本在面板实际字体下的最大宽度（px）。
-   用与 .rlog-reply-status 相同的样式临时渲染到 body 外不可见位置测量，
-   结果写入面板 CSS 变量 --rlog-status-w（在 renderPanelContent 中应用），
-   使等待占位与到达后的状态标签共用同一槽位宽度，回复到达不引起布局跳动。
-   探针挂到 body 且显式继承面板计算字体，面板窗口折叠/隐藏时也能测得真实宽度；
-   仅当 body 异常隐藏等场景量出 0 时返回 0（占位退化为不占宽），
-   且只在测出有效宽度时缓存，避免把 0 缓存成永久失效。
+/* 实测三个状态标签在当前字体下的最大宽度（px），写入 --rlog-status-w，供等待占位共用槽位宽度，
+   回复到达不引起布局跳动。探针挂 body 并显式继承面板字体（面板折叠时也能测），
+   只有测出有效宽度才缓存（避免把 0 缓存成永久失效）。
    @returns {number} */
 function getReplyStatusMaxWidth() {
     if (replyStatusMaxWidth !== null) return replyStatusMaxWidth;
@@ -1312,11 +1310,8 @@ function getReplyStatusMaxWidth() {
     return max;
 }
 
-/* 状态标记悬停提示：状态 + 原因 + 回复终态时间
-   状态已有标签上的字样展示，这里不再重复；只显示动态原因 + 时间。
-   成功无特殊原因，统一显示固定文案 Succeed。
-   @param {object} record 包含 record.reply 的记录
-   @returns {string} */
+/* 状态标记悬停提示：只显示动态原因 + 终态时间（状态字样标签上已有）；成功统一显示 Succeed
+   @param {object} record @returns {string} */
 function getReplyStatusTitle(record) {
     const reply = record && record.reply;
     if (!reply) return '';
@@ -1330,10 +1325,8 @@ function getReplyStatusTitle(record) {
     return `${reason} · ${reply.time || ''}`;
 }
 
-/* 拼接回复最终展示内容：思考用 `<think>...</think>` 包裹，空一行后接正文（正文无标记）。
-   只有思考或只有正文时只输出对应部分。
-   @param {object} replyData { reasoning, content }
-   @returns {string} */
+/* 拼接回复展示内容：思考用 <think> 包裹、空一行后接正文
+   @param {object} replyData { reasoning, content } @returns {string} */
 function buildReplyContent(replyData) {
     const reasoning = (replyData.reasoning || '').trim();
     const content = (replyData.content || '').trim();
@@ -1343,13 +1336,9 @@ function buildReplyContent(replyData) {
     return parts.join('\n\n');
 }
 
-/* 向正文/思考累积区追加一段文本。
-   兼容「增量式」（OpenAI/Anthropic，逐块追加）与「累计式」（Gemini 等，
-   每块携带截至当前的全部文本）：新文本是已累积文本的前缀且更长 → 替换；否则追加。
-   与已累积文本完全相同的重复块视为无新增，跳过。
-   @param {object} entry pendingReplies 中的条目
-   @param {string} text 新增文本
-   @param {boolean} isReasoning true 表示思考内容（reasoning/thinking/thought） */
+/* 向正文/思考累积区追加文本：新文本是已累积文本的前缀且更长 → 替换（Gemini 等累计式），
+   否则追加（OpenAI/Anthropic 增量式）；完全相同的重复块视为无新增、跳过。
+   @param {object} entry @param {string} text @param {boolean} isReasoning */
 function appendReplyText(entry, text, isReasoning) {
     if (!text) return;
     const key = isReasoning ? 'reasoning' : 'content';
@@ -1366,12 +1355,9 @@ function appendReplyText(entry, text, isReasoning) {
     /* text === acc（等长重复）视为无新增，跳过 */
 }
 
-/* 从单个 JSON chunk 中提取正文/思考增量。
-   兼容 OpenAI 兼容格式（delta/message/text + reasoning_content/reasoning）、
-   Anthropic（delta.text / delta.thinking / content 数组）、
-   Gemini（candidates[0].content.parts，thought 部分归入思考）。
-   @param {object} chunk 已解析的响应数据
-   @param {number} captureId */
+/* 从单个 JSON chunk 提取正文/思考增量（兼容 OpenAI delta/message/text + reasoning_content、
+   Anthropic delta.text/delta.thinking/content 数组、Gemini candidates[0].content.parts）
+   @param {object} chunk @param {number} captureId */
 function extractReplyFromChunk(chunk, captureId) {
     const entry = pendingReplies.get(captureId);
     if (!entry || entry.finished) return;
@@ -1427,10 +1413,8 @@ function extractReplyFromChunk(chunk, captureId) {
     }
 }
 
-/* 解析一段 SSE 文本（多个以空行分隔的事件），逐事件提取增量。
-   兼容 `data:` 行、`[DONE]` 结束标记与事件内的错误对象。
-   @param {string} text SSE 文本
-   @param {number} captureId */
+/* 解析一段 SSE 文本（多个空行分隔的事件），逐事件提取增量，兼容 data: 行与 [DONE]
+   @param {string} text @param {number} captureId */
 function processSseText(text, captureId) {
     if (!text) return;
     const events = text.split(/\r\n\r\n|\r\r|\n\n/);
@@ -1454,14 +1438,10 @@ function processSseText(text, captureId) {
     }
 }
 
-/* 统一增量读取响应体（不依赖 Content-Type 分流）：
-   - 响应体内出现 `data:` 行即按 SSE 增量解析（兼容代理把流式响应标成 application/json 的情况）；
-   - 未出现 SSE 标记则等到流结束后按 JSON（或纯文本）整体解析；
-   - 流被中止/异常时，SSE 模式保留已解析内容（含半截思考），JSON 模式尚无可用内容则记空回复。
-   读取的是 response.clone() 的 body，不影响 ST/其他插件消费原响应。
-   @param {Response} clone response.clone()
-   @param {number} captureId
-   @param {string|null} hintMode 'sse'（Content-Type 已声明 text/event-stream）或 null（按内容识别） */
+/* 统一增量读取响应体（不依赖 Content-Type）：出现 data: 行即按 SSE 解析（兼容代理把流式响应标成
+   application/json）；否则等流结束后整体解析 JSON/文本。中止/异常时 SSE 保留已收内容，
+   JSON 无可用内容则记空回复。读取 clone，不影响 ST 与其他插件。
+   @param {Response} clone @param {number} captureId @param {string|null} hintMode */
 function readResponseBody(clone, captureId, hintMode = null) {
     if (!clone || !clone.body || typeof clone.body.getReader !== 'function') {
         finalizeReply(captureId, 'fail', 'empty body');
@@ -1552,12 +1532,8 @@ function extractErrorMessage(data) {
     return candidates.find(s => s && s.trim()) || '';
 }
 
-/* 尽力读取非 2xx 响应的错误正文，提取真实报错信息（如接口返回「模型不存在」）。
-   响应体只能读一次，必须 clone 副本读取，不影响 ST/其他插件消费原响应；
-   任何失败（克隆失败/流报错/空体/非 JSON/无可用字段）都回退到仅含状态码的 baseReason。
-   @param {Response} response 原始（非 2xx）响应
-   @param {number} captureId
-   @param {string} baseReason 回退原因（如 `HTTP 500`） */
+/* 读取非 2xx 响应正文提取真实报错（响应体只能读一次，必须读 clone）；任何失败回退到 baseReason
+   @param {Response} response @param {number} captureId @param {string} baseReason */
 function readErrorResponseBody(response, captureId, baseReason) {
     let clone = null;
     try {
@@ -1610,11 +1586,8 @@ function readErrorResponseBody(response, captureId, baseReason) {
     pump();
 }
 
-/* 为一次已捕获的 AI 请求挂回复追踪：在返回给调用方的 fetchPromise 上追加处理，
-   不改变该 Promise 本身；读取 clone 不影响原响应。
-   @param {Promise<Response>} fetchPromise 原始 fetch 返回的 Promise
-   @param {string} requestUrl 请求 URL
-   @param {number} captureId 请求捕获编号 */
+/* 为已捕获的请求挂回复追踪：在 fetchPromise 上追加处理、不改动该 Promise，读 clone 不影响原响应
+   @param {Promise<Response>} fetchPromise @param {string} requestUrl @param {number} captureId */
 function captureResponseForRequest(fetchPromise, requestUrl, captureId) {
     if (!isPotentialGenerationUrl(requestUrl)) return;
 
@@ -1670,11 +1643,8 @@ function captureResponseForRequest(fetchPromise, requestUrl, captureId) {
     });
 }
 
-/* 回复追踪终态处理：标记完成、释放读取器、挂到已存在的记录；
-   记录尚未建成时保留在待办区，等待 addRecord 挂载（带 60s 保留上限）。
-   @param {number} captureId
-   @param {string} status 'succeed' | 'fail' | 'timeout'
-   @param {string} failReason 失败/超时原因 */
+/* 回复追踪终态：标记完成、释放读取器、挂到已有记录；记录未建成则留在待办区（60s 上限）
+   @param {number} captureId @param {string} status @param {string} failReason */
 function finalizeReply(captureId, status, failReason) {
     const entry = pendingReplies.get(captureId);
     if (!entry || entry.finished) return;
@@ -1726,10 +1696,8 @@ function abortPendingReply(captureId) {
     pendingReplies.delete(captureId);
 }
 
-/* 取出并删除一条已终态的回复待办（供 addRecord 挂载时消费）。
-   仅在回复已终态（finished）时才返回，避免把尚在途的占位条目挂成空回复。
-   @param {number} captureId
-   @returns {object|null} */
+/* 取出并删除一条已终态的回复待办（仅在 finished 时返回，避免把在途占位挂成空回复）
+   @param {number} captureId @returns {object|null} */
 function consumePendingReply(captureId) {
     const entry = pendingReplies.get(captureId);
     if (!entry || !entry.finished) return null;
@@ -1748,12 +1716,9 @@ function findRecordByCaptureId(captureId) {
     return tourPendingRecords.find(r => r.id === captureId) || null;
 }
 
-/* 把已终态的回复数据挂到记录上（record.reply），并异步计算 token。
-   回复到达不重建整个列表 DOM：直接把 Response 子消息追加到记录末尾，
-   不打断正在进行的阅读（列表滚动位置、消息内容区滚动位置、搜索状态都保持不动）。
-   @param {object} record 目标记录
-   @param {object} replyData 终态回复数据（pendingReplies 条目）
-   @param {boolean} [skipRender=false] true 时本次不追加（记录尚未进入 DOM，由调用方统一渲染） */
+/* 把终态回复挂到记录（record.reply）并异步算 token；只追加 Response 子消息、不重建列表，
+   阅读位置与搜索状态不受影响。
+   @param {object} record @param {object} replyData @param {boolean} [skipRender=false] */
 function attachReplyToRecord(record, replyData, skipRender = false) {
     if (!record || record.reply) return;
     /* Fail/Timeout 时把失败原因写进回复内容：已有内容（如中止保留的半截回复）末尾空一行追加； */
@@ -1779,11 +1744,9 @@ function attachReplyToRecord(record, replyData, skipRender = false) {
     if (!skipRender) appendReplyToRecordDom(record);
 }
 
-/* 回复到达：把 Response 子消息追加到该记录消息列表末尾。
-   只动「该记录末尾 + 标题栏状态标记」，不重建整个列表——
-   正在阅读时列表滚动位置、消息内容区滚动位置、搜索状态都保持不动。
-   面板不可见 / 记录不在 DOM / 引导期间只置脏标记，下次渲染自然带上回复。
-   @param {object} record 目标记录 */
+/* 回复到达：只把 Response 子消息追加到该记录末尾并更新标题栏状态，不重建列表（阅读位置、
+   内容区滚动、搜索状态保持不变）；面板不可见/记录不在 DOM/引导期间只置脏标记。
+   @param {object} record */
 function appendReplyToRecordDom(record) {
     panelContentDirty = true;
     if (!panelEl || !isPanelVisible || tourActive) return;
@@ -2074,11 +2037,12 @@ function updatePreviewToggleUI() {
     }
 }
 
-/* ── 偏好设置（持久化 + 图标态；5 项行为已实现） ─────────────── */
+/* ── 偏好设置（持久化 + 图标态；6 项行为已实现） ─────────────── */
 
 /* 偏好设置键 → localStorage 存储键 映射（与「可调参数」区同风格集中管理） */
 const PREF_STORAGE_KEYS = {
     badgeDefault: STORAGE_PREF_BADGE_DEFAULT,
+    followStTheme: STORAGE_PREF_FOLLOW_ST_THEME,
     mobileFull: STORAGE_PREF_MOBILE_FULL,
     clickOutside: STORAGE_PREF_CLICK_OUTSIDE,
     filterPersist: STORAGE_PREF_FILTER_PERSIST,
@@ -2100,7 +2064,8 @@ function savePreference(key, value) {
 
 /* 是否至少有一项偏好处于激活（用于切换「偏好设置」入口图标 fa-heart ↔ fa-heart-circle-check） */
 function hasActivePreference() {
-    return preferences.badgeDefault || preferences.mobileFull || preferences.clickOutside || preferences.filterPersist || preferences.minimal;
+    return preferences.badgeDefault || preferences.followStTheme || preferences.mobileFull
+        || preferences.clickOutside || preferences.filterPersist || preferences.minimal;
 }
 
 /* 更新「偏好设置」入口图标：
@@ -2130,23 +2095,32 @@ function syncPrefToggleUI() {
 }
 
 /* 设置某个偏好：更新状态 + 持久化 + 刷新图标态与开关视觉。
-   五项偏好均已接入实际行为（见下方各 key 处理）。 */
+   六项偏好均已接入实际行为（见下方各 key 处理）。 */
 function setPreference(key, value) {
     if (!(key in preferences)) return;
     preferences[key] = !!value;
     savePreference(key, preferences[key]);
     updatePrefButtonIcon();
     syncPrefToggleUI();
-    /* 「移动端全屏」：切换后立即应用/撤销全屏（仅移动端视口生效）。
-       「点击面板外关闭」无需即时动作：全局点击监听在点击时读取该标志即可生效。
-       「筛选状态持久化」：开启时用当前内存态立即落盘（避免读到陈旧值）；关闭时不改动当前筛选。
-       「极简模式」：切换后立即给影子宿主加/去类，关掉全部动效。
-       「浮标默认入口」：开启且面板隐藏时立即显示浮标（按默认位置定位）；关闭时若浮标并非因「折叠」
-       而显示则隐藏（否则保留折叠态浮标），避免 API 直接改设置留下残留。 */
+    /* 偏好开关的即时行为：移动端全屏立即应用/撤销；点击面板外关闭靠全局点击监听读取标志；
+       筛选持久化开启时立即落盘；极简模式立即给影子宿主加/去类；跟随 ST 主题开启时立即同步、
+       关闭时把当前主题落盘一次；浮标默认入口按面板是否隐藏决定立即显示/隐藏浮标。 */
     if (key === 'mobileFull') updateMobileFullscreenClass();
     if (key === 'filterPersist' && preferences.filterPersist) saveFilterState();
     if (key === 'minimal') updateMinimalClass();
+    if (key === 'followStTheme') setPreferenceFollowStThemeBehavior();
     if (key === 'badgeDefault') setPreferenceBadgeDefaultBehavior();
+}
+
+/* 「昼夜模式跟随 ST 主题」切换后的即时行为：开启→挂 ST 主题监听并立即同步（面板已打开时按
+   现有昼/夜动画切换）；关闭→用 saveTheme() 把当前主题落盘一次（记住它），此后 ST 变化不再
+   影响面板。不额外保存「上一次手动主题」这类状态。 */
+function setPreferenceFollowStThemeBehavior() {
+    if (preferences.followStTheme) {
+        initPanelThemeFollow(true);
+    } else {
+        saveTheme(isLightTheme);
+    }
 }
 
 /* 应用「浮标默认入口」偏好切换后的即时行为（开启/关闭的边界处理）。
@@ -2207,10 +2181,8 @@ function closePrefPanel() {
     prefOverlayEl.classList.remove('rlog-pref-open');
 }
 
-/* 更新偏好设置列表的滚动提示箭头：
-   仅在内容真的需要滚动时显示对应方向的箭头（向上有内容→下箭头提示仍可滚动范围），
-   到底/到顶/无需滚动时隐藏；箭头只作状态提示，不参与交互。
-   依赖 buildUI 内绑定的 .rlog-pref-list scroll 事件与 openPrefPanel 里的首帧更新。 */
+/* 更新偏好列表滚动提示箭头：仅内容真需要滚动时显示对应方向箭头，只作提示、不参与交互
+   （依赖 buildUI 绑定的 scroll 事件与 openPrefPanel 的首帧更新）。 */
 function updatePrefScrollArrows() {
     if (!prefOverlayEl) return;
     const list = prefOverlayEl.querySelector('.rlog-pref-list');
@@ -2238,12 +2210,40 @@ function applyTheme() {
     } else {
         panelEl.classList.remove('rlog-light');
     }
-    /* 主题类同步到影子宿主：浮标的主题色变量挂 #rlog-shadow-host（宿主自定义属性跨影子边界
-       继承给浮标），亮色时给宿主加 .rlog-light 使浮标切到亮色配色。 */
+    /* 主题类同步到影子宿主：影子内的弹窗靠宿主上的 .rlog-light 切亮暗（跨影子边界继承）。
+       浮标是独立宿主、配色反向跟随 ST 主题，由 syncBadgeTheme() 单独处理，与本主题类无关。 */
     if (shadowHostEl) {
         if (isLightTheme) shadowHostEl.classList.add('rlog-light');
         else shadowHostEl.classList.remove('rlog-light');
     }
+}
+
+/* 把面板主题同步到 ST 当前主题（同向；浮标反向取色属另一套逻辑）。复用现有机制：
+   isStThemeDark() 取信号、applyTheme() 切面板与影子宿主主题类、updateThemeButtonIcon() 刷图标。
+   @param {boolean} animate 主题确实变化时是否播放切换动画（面板已打开且非极简才生效） */
+function syncPanelThemeToSt(animate) {
+    if (!preferences.followStTheme) return;
+    const isLight = !isStThemeDark();
+    /* 状态与 DOM 类都已一致就跳过（多一道类检查：宿主重建后也能自愈） */
+    if (isLight === isLightTheme && (!panelEl || panelEl.classList.contains('rlog-light') === isLight)) return;
+    isLightTheme = isLight;
+    /* 注意：跟随时不写主题存储——「记住当前主题」只在关闭开关那一下执行一次
+       （见 setPreference 的 followStTheme 分支），跟随时始终保留用户上次手动设定的值 */
+    applyTheme();
+    updateThemeButtonIcon();
+    if (animate && isPanelVisible) playThemeSwitchAnimation();
+}
+
+/* 初始化「昼夜模式跟随 ST 主题」：先静默同步一次，再挂 <html> style 属性监听（与浮标同一挂点，
+   当前 ST 切主题/改色都会把 --SmartTheme* 写在那里，ST 没有主题变化事件）。
+   挂点将来失效只表现为不再自动跟随（fail-safe）；观察者只挂一次，回调先判偏好是否仍开启。
+   @param {boolean} animate 首次同步是否允许播动画（初始化传 false） */
+function initPanelThemeFollow(animate) {
+    if (!preferences.followStTheme) return;
+    syncPanelThemeToSt(animate);
+    if (panelThemeObserver) return;
+    panelThemeObserver = new MutationObserver(() => syncPanelThemeToSt(true));
+    panelThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
 }
 
 /* 从 localStorage 加载用户设定的最大记录数
@@ -2416,14 +2416,9 @@ function closeMaxRecordsDialog() {
 /* HTMLElement|null: 当前确认弹窗的 DOM 元素 */
 let confirmDialogEl = null;
 
-/* 创建并显示通用确认弹窗（用于清空所有记录、删除单条记录等破坏性操作）
-   @param {object} options 配置项
-   @param {string} [options.title='确认操作'] 弹窗标题
-   @param {string} [options.message=''] 弹窗正文（支持 HTML）
-   @param {string} [options.confirmText='确认'] 确认按钮文字
-   @param {string} [options.cancelText='取消'] 取消按钮文字
-   @param {Function} [options.onConfirm] 点击确认后的回调函数
-   @param {Function} [options.onCancel] 点击取消/关闭后的回调函数 */
+/* 通用确认弹窗（清空记录、删除单条等破坏性操作）
+   @param {object} options { title=确认操作, message=, confirmText=确认, cancelText=取消,
+   onConfirm, onCancel } */
 function showConfirmDialog(options) {
     const {
         title = '确认操作',
@@ -2586,17 +2581,9 @@ const WHITESPACE_CHARS = new Set([' ', '\t', '\n', '\r', '\f', '\v', '\u00a0', '
     '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007',
     '\u2008', '\u2009', '\u200a', '\u2028', '\u2029', '\u202f', '\u205f', '\u3000', '\ufeff']);
 
-/* 将文本归一化用于搜索匹配：所有空白字符（空格、换行、回车、Tab、全角空格等）的连续序列折叠为单个空格。
-   同时返回归一化后每个字符在原始文本中的索引映射，用于将匹配偏移恢复为原始内容偏移。
-   
-   为什么需要：用户从外部复制多段文本搜索时，换行符在复制粘贴过程中常被转换为空格。
-   若消息内容中段落间是换行（\n 或 \r\n），直接按原文本匹配会失败。
-   归一化让「内容中的换行/空白」与「关键词中的空格」等价，实现跨换行匹配。
-   
-   @param {string} text 原始文本
-   @returns {{normalized: string, map: number[]}}
-   normalized: 空白折叠后的文本（长度 ≤ 原始长度）
-   map: 长度为 normalized.length，map[i] = normalized 第 i 个字符在原始文本中的索引 */
+/* 搜索用文本归一化：空白连续序列折叠为单个空格，并返回「归一化字符 → 原始索引」映射。
+   目的是让内容里的换行/空白与关键词里的空格等价——从外部复制的多段文本常把换行转成空格。
+   @param {string} text @returns {{normalized, map}} */
 function normalizeTextWithMap(text) {
     let normalized = '';
     const map = [];
@@ -2620,15 +2607,9 @@ function normalizeTextWithMap(text) {
     return { normalized, map };
 }
 
-/* 在指定记录的所有消息内容中查找匹配位置
-   仅做字符串索引扫描，不触碰 DOM，保证极端长文本下性能稳定。
-   匹配前对内容和关键词做统一归一化（空白折叠），因此：
-   - 从外部复制多段文本搜索（换行被复制系统转为空格）也能正常匹配
-   - 消息内容中的 \n / \r\n / 空行与关键词中的空格等价
-   - 匹配结果 start/end 为原始内容偏移（经映射恢复），可直接用于 DOM 高亮
-   @param {number} recordIndex 记录索引
-   @param {string} keyword 搜索关键词
-   @returns {Array<{msgIdx: number, start: number, end: number}>} 匹配位置列表 */
+/* 在指定记录的所有消息中查找匹配（纯字符串扫描、不碰 DOM，长文本下性能稳定）。双方都做归一化，
+   跨换行/复制进来的空格也能匹配；返回的 start/end 是原始内容偏移，可直接用于高亮。
+   @param {number} recordIndex @param {string} keyword @returns {Array<{msgIdx,start,end}>} */
 function findMatchesInRecord(recordIndex, keyword) {
     const record = records[recordIndex];
     if (!record || !record.messages || !keyword) return [];
@@ -2654,12 +2635,9 @@ function findMatchesInRecord(recordIndex, keyword) {
     return matches;
 }
 
-/* 在单条消息/回复内容中收集所有关键词匹配（归一化偏移映射，兼容 CRLF）。
-   @param {string} content 消息/回复内容
-   @param {number} msgIdx 消息索引（回复为 messages.length）
-   @param {string} normalizedKeyword 归一化关键词
-   @param {string} lowerKeyword 小写关键词
-   @param {Array} matches 输出数组 */
+/* 在单条消息/回复内容中收集关键词匹配（归一化偏移映射，兼容 CRLF）
+   @param {string} content @param {number} msgIdx @param {string} normalizedKeyword
+   @param {string} lowerKeyword @param {Array} matches */
 function addContentMatches(content, msgIdx, normalizedKeyword, lowerKeyword, matches) {
     if (typeof content !== 'string' || !content) return;
     /* 与 DOM 渲染保持一致：浏览器解析 innerHTML 时会把 \r\n / \r 规范化为 \n， */
@@ -2703,12 +2681,8 @@ function clearSearchHighlights() {
     });
 }
 
-/* 将当前命中的橙色高亮降级为普通黄色高亮（保留在 DOM 中）
-   供导航跳转时复用已绘制的黄色高亮，避免全量重绘卡顿。
-   与 clearSearchHighlights 不同：它不删除 mark，只切换 CSS 类名，
-   因此旧命中重新变回黄色，折叠消息中的旧命中在重新展开后也保留黄色高亮。
-   降级时记录旧命中的 matchIdx，保证后续跳回该位置时能被 removeYellowMarkByMatchIdx 找到。
-   @param {number} [oldMatchIdx] 旧命中的 matchIdx（可选，用于记录标记） */
+/* 把当前命中的橙色高亮降级为黄色（只换类名、不删 mark），供导航复用已绘制的高亮避免全量重绘；
+   降级时记录 matchIdx，便于跳回时定位。@param {number} [oldMatchIdx] */
 function clearCurrentHighlight(oldMatchIdx) {
     const listEl = panelEl ? panelEl.querySelector('#rlog-list') : null;
     if (!listEl) return;
@@ -2735,13 +2709,9 @@ function removeYellowMarkByMatchIdx(matchIdx) {
     });
 }
 
-/* 在指定消息的内容区域中，将字符偏移 [start, end) 对应的文本包裹为 <mark>
-   使用 TreeWalker 遍历 text node 精确定位偏移。
-   @param {HTMLElement} contentEl .rmsg-content 元素
-   @param {number} start 起始偏移（相对该消息的纯文本）
-   @param {number} end 结束偏移
-   @param {string} [className='rlog-search-mark-current'] <mark> 的 CSS 类名（普通匹配用黄色，当前命中用橙色）
-   @returns {HTMLElement|null} 创建的 <mark> 元素，失败返回 null */
+/* 把消息内容中 [start, end) 的文本包成 <mark>（TreeWalker 精确定位偏移）
+   @param {HTMLElement} contentEl @param {number} start @param {number} end
+   @param {string} [className=rlog-search-mark-current] @returns {HTMLElement|null} */
 function highlightRange(contentEl, start, end, className = 'rlog-search-mark-current') {
     if (!contentEl || start < 0 || end <= start) return null;
 
@@ -2793,10 +2763,9 @@ function highlightRange(contentEl, start, end, className = 'rlog-search-mark-cur
     return mark;
 }
 
-/* 高亮本条记录内所有匹配位置（黄色），但不包括当前命中（当前命中由 applyCurrentMatch 单独绘制橙色）
-   同一消息内按 start 降序处理，避免先插入的 mark 影响后续文本偏移计算。
-   @param {HTMLElement} recordEl 当前记录的 DOM 元素
-   @param {number} recordIndex 记录索引 */
+/* 高亮本条记录内所有匹配（黄色，不含当前命中——它由 applyCurrentMatch 画橙色）；
+   同一消息内按 start 降序处理，避免先插入的 mark 影响后续偏移
+   @param {HTMLElement} recordEl @param {number} recordIndex */
 function highlightAllMatches(recordEl, recordIndex) {
     if (!searchState || !recordEl) return;
     const record = records[recordIndex];
@@ -2836,14 +2805,9 @@ function highlightAllMatches(recordEl, recordIndex) {
     });
 }
 
-/* 将当前命中滚动到视野内舒适位置
-   步骤：
-   1. 滚动所在消息的 .rmsg-content 内部，使匹配出现在该滚动容器中
-   2. 手动计算 .rlog-list 的 scrollTop，让消息区域出现在固定标题栏下方
-   说明：不使用 scrollIntoView——它会递归滚动所有可滚动祖先容器，
-   在移动端会连带滚动 ST 主界面（body/#sheld 等），造成整个界面位移。
-   @param {HTMLElement} markEl 当前高亮的 <mark> 元素
-   @param {HTMLElement} contentEl 所在 .rmsg-content 元素 */
+/* 把当前命中滚到舒适位置：先滚 .rmsg-content 内部，再算 .rlog-list 的 scrollTop 让消息落在
+   吸顶标题栏下方。不用 scrollIntoView——它会递归滚动所有可滚动祖先，移动端会连带滚动 ST 主界面。
+   @param {HTMLElement} markEl @param {HTMLElement} contentEl */
 /* 返回当前应使用的滚动行为：极简模式用 'auto' 直接跳转，否则 'smooth' 平滑。
    极简定位逻辑不变（位置计算/夹取照旧），只把滚动方式由平滑改成瞬时。 */
 function getScrollBehavior() {
@@ -2928,12 +2892,10 @@ function updateSearchCounter() {
     if (nextBtn) nextBtn.disabled = total <= 1;
 }
 
-/* 在指定消息索引处执行搜索，并高亮当前命中 + 滚动到该位置
-   @param {number} msgIdx 消息索引
-   @param {number} matchIdx 匹配在 matches 中的下标
-   @param {boolean} [redrawYellowHighlights=true] 是否重绘普通匹配的黄色高亮
-   - true（搜索词变化时）: 清除所有高亮后重新绘制全部黄色匹配
-   - false（上下键导航时）: 只清除当前橙色命中，复用已绘制的黄色高亮（性能优化） */
+/* 在指定消息处执行搜索并高亮当前命中 + 滚动到该位置
+   @param {number} msgIdx @param {number} matchIdx
+   @param {boolean} [redrawYellowHighlights=true] 搜索词变化传 true（清掉全部高亮重绘）；
+   上下键导航传 false（只清当前橙色命中，复用已绘制的黄色高亮） */
 function applyCurrentMatch(msgIdx, matchIdx, redrawYellowHighlights = true) {
     if (!searchState) return;
     const recordIndex = searchState.recordIndex;
@@ -3569,12 +3531,9 @@ function renderPanelContent() {
     panelContentDirty = false;
 }
 
-/* 同步每条记录的 --rlog-rec-h：记录标题栏（.rlog-record-header）的实际高度。
-   
-   消息标题栏（.rmsg-header）的 sticky top 需要等于记录标题栏的高度，才能正好吸在
-   记录标题栏正下方。记录标题栏高度会随宽度变化（窄屏时信息换行，实测可达 100px+），
-   写死 40px/36px 会让消息标题被记录标题遮挡。这里按每条记录实测写入 CSS 变量，
-   浏览器原生 sticky 用该变量定位；变量只在布局变化时更新，不参与逐帧滚动。 */
+/* 同步每条记录的 --rlog-rec-h = 记录标题栏实际高度：消息标题栏的 sticky top 必须等于它才能吸在
+   记录标题栏正下方，而记录标题栏会因换行变高（窄屏可达 100px+），写死 40/36px 会被遮住。
+   只在布局变化时写入，不参与逐帧滚动。 */
 function syncRecordHeaderVars(listEl) {
     if (!listEl) return;
     ensureSharedResizeObserver();
@@ -3602,17 +3561,11 @@ function syncRecordHeaderVars(listEl) {
     });
 }
 
-/* 滚动锚定包装器：在执行展开/折叠动作前后记录元素位置，
-   并补偿滚动条，使锚点元素（标题栏）在视口中保持相对静止。
-   折叠会使锚点标题栏上移：一是内容变矮导致恢复的 scrollTop 被浏览器
-   静默钳到新的最大值，二是吸顶标题栏随容器变矮而「脱钉」回落到流位置——
-   两种机制都会把标题栏顶出视口。检测到锚点在视口内上移超过 1px 时，
-   用折叠前后的视口相对位置差反向校正滚动；无上移（含展开时吸顶下移，
-   属正常吸顶行为）不校正，行为逐像素不变。
-   注意：折叠类操作必须传 anchorEl（被点击的记录/消息标题栏），
-   否则钳制缺口会残留；「展开」类操作只增不减不钳制，可不传。
-   @param {Function} action 执行导致高度变化的 DOM 操作
-   @param {HTMLElement|null} [anchorEl] 需要在视口中保持静止的锚点元素 */
+/* 滚动锚定：动作前后比较锚点在视口内的位置，上移超过 1px 就用位置差反向校正滚动。
+   只保 scrollTop 数值不够——恢复值会被浏览器静默钳到新上限，吸顶标题栏还会随容器变矮脱钉回落，
+   两种机制都会把标题栏顶出视口；展开时吸顶下移属正常行为，不校正。
+   折叠类操作必须传 anchorEl（被点击的记录/消息标题栏），否则钳制缺口会残留；展开类可不传。
+   @param {Function} action @param {HTMLElement|null} [anchorEl] */
 function preserveScrollTop(action, anchorEl) {
     const listEl = panelEl ? panelEl.querySelector('#rlog-list') : null;
     if (!listEl) { action(); return; }
@@ -3693,11 +3646,9 @@ function bindListEvents(listEl) {
             }, this);
         });
 
-        /* 长按记录标题栏切换置顶：绑定到整个 .rlog-record-header。
-           - 折叠状态：按钮隐藏，整行（含空白/状态标签/箭头）都可长按；
-           - 展开状态：仅排除真实 <button> 实际所占区域，以及搜索框这个交互区；
-           - 单击折叠/展开逻辑不交叠（长按触发后抑制后续 click）。
-           使用 Pointer Events 实现：移动超容差或提前抬起即取消。 */
+        /* 长按记录标题栏切换置顶（Pointer Events：移动超容差或提前抬起即取消）：
+           折叠态整行可长按（含空白/状态标签/箭头），展开态只排除真实 <button> 与搜索框；
+           长按触发后抑制后续 click，避免与单击折叠/展开打架。 */
         let longPressTimer = null;
         let activePointerId = null;
         let currentPointerType = null;
@@ -3871,11 +3822,8 @@ function toggleRecordCollapse(index, recordEl) {
     }
 }
 
-/* 切换单条记录的临时置顶状态。
-   - 置顶时不占用普通记录上限、不参与自动清理。
-   - 从普通变置顶且记录展开时折叠整条记录（子消息折叠状态不变）。
-   - 取消置顶不自动展开，记录恢复参与普通记录清理。
-   - 不主动滚动到该记录（保留当前滚动位置），仅用 toast 反馈。 */
+/* 切换单条记录的临时置顶：置顶不占普通记录上限、不被自动清理；从普通变置顶且记录展开时
+   折叠整条（子消息折叠态不变）；取消置顶不自动展开、恢复参与清理；不主动滚动，只用 toast 反馈。 */
 function toggleRecordPinned(index, infoEl) {
     if (index < 0 || index >= records.length) return;
     const record = records[index];
@@ -3928,10 +3876,7 @@ function hidePinToast() {
     }
 }
 
-/* 移动端长按重排期间的 hover 抑制：
-   给 #rlog-list 加临时类，让补位记录不因触摸模拟 hover 凭空高亮；
-   抑制类在「下一次新触摸/点击(pointerdown)」或「鼠标移动(pointermove)」时移除，
-   不随本次手势的 pointerup/pointercancel 清除，避免触摸浏览器残留 :hover 重新冒出。 */
+/* 移动端长按重排期间给 #rlog-list 加临时类，让补位记录不因触摸模拟 hover 凭空高亮 */
 function beginHoverSuppress() {
     if (!panelEl) return;
     const listEl = panelEl.querySelector('#rlog-list');
@@ -3951,11 +3896,9 @@ function beginHoverSuppress() {
 
     const onMouseMove = (e) => { if (e.pointerType === 'mouse') end(); };
 
-    /* 不在本次手势的 pointerup/pointercancel 就清除：触摸浏览器（Android WebView 等）会残留 :hover，
-       且重排时可能触发 pointercancel，过早清除都会让补位条目重新显示 hover。
-       改为：下一次新触摸/点击(pointerdown)或鼠标移动(pointermove)时再清除。
-       不设兜底超时——纯触屏没有鼠标 hover，等待下一次 pointerdown 才清除，
-       避免「隔一会儿自动恢复抑制导致残留 hover 又冒出来」。 */
+    /* 抑制类不随本次手势的 pointerup/pointercancel 清除（触屏浏览器会残留 :hover，重排还可能触发
+       pointercancel），改在「下一次 pointerdown / 鼠标 pointermove」时清除；不设兜底超时，
+       否则抑制自动恢复后残留的 hover 会再冒出来。 */
     document.addEventListener('pointerdown', end, { capture: true });
     document.addEventListener('pointermove', onMouseMove, { capture: true });
 }
@@ -3985,10 +3928,8 @@ function toggleMessageCollapse(recIdx, msgIdx, msgItem) {
     }
 }
 
-/* 按消息索引取消息：前 N 条为 record.messages，最后一条伪消息为回复（data-msg = messages.length）。
-   @param {object} record 记录对象
-   @param {number} msgIdx 消息索引（含回复伪索引）
-   @returns {object|null} */
+/* 按消息索引取消息：前 N 条为 record.messages，最后一条伪消息是回复（data-msg = messages.length）
+   @param {object} record @param {number} msgIdx @returns {object|null} */
 function getMessageByIndex(record, msgIdx) {
     if (!record) return null;
     if (msgIdx < record.messages.length) return record.messages[msgIdx];
@@ -4078,10 +4019,8 @@ function expandRecordMessages(index) {
     }
 }
 
-/* 单条记录「快速置底」按钮 — 滚动到本条记录最后一条子消息（有回复时为 Response，
-   无回复时为最后一条普通消息），并让该子消息标题栏闪烁提示位置。
-   跳转只负责定位 + 闪烁，不改变任何消息的折叠/展开状态。
-   @param {number} index 记录索引 */
+/* 单条记录「快速置底」：滚到本条最后一条子消息（有回复即 Response）并让其标题栏闪烁；
+   只定位 + 闪烁，不改任何折叠/展开状态。@param {number} index */
 function scrollToRecordBottom(index) {
     if (!panelEl) return;
     const listEl = panelEl.querySelector('#rlog-list');
@@ -4195,10 +4134,8 @@ function scrollToRecordEl(recordEl) {
     }
 }
 
-/* 无按钮回顶时的提示闪烁：列表回到顶部后，对顶部（最新一条）记录做一次
-   与置底相同的轻微闪烁，提示「当前已回到最新一条」。
-   顶部记录展开时闪第一条子消息标题栏（与置底镜像），折叠/不可见时闪记录标题栏
-   （保证目标始终可见）。界面未打开（后台记录状态）或窗口折叠时不触发。 */
+/* 无按钮回顶的提示闪烁：回到顶部后对顶部（最新）记录做与置底相同的闪烁。展开时闪第一条
+   子消息标题栏（与置底镜像），折叠/不可见时闪记录标题栏；面板未打开或窗口折叠时不触发。 */
 function flashTopHint(recordEl) {
     if (!panelEl || !isPanelVisible || isPanelCollapsed) return;
     const listEl = panelEl.querySelector('#rlog-list');
@@ -4214,10 +4151,8 @@ function flashTopHint(recordEl) {
     }
 }
 
-/* 触发子消息标题栏的底色闪烁（跳转后提示「最后一条在这里」）。
-   先移除类 + 强制回流再添加，保证连续点击可以重播动画；
-   每个标题栏只挂一次 animationend 监听（按动画名过滤），动画结束后自动移除类。
-   @param {HTMLElement} headerEl 目标 .rmsg-header 元素 */
+/* 子消息标题栏底色闪烁：先移除类 + 强制回流再添加，保证可重播；每个标题栏只挂一次
+   animationend 监听，动画结束自动移除类。@param {HTMLElement} headerEl */
 function triggerHeaderFlash(headerEl) {
     if (!headerEl) return;
     /* 极简模式：不做标题栏底色闪烁（仅保留滚动定位），同时避免 animation:none 下
@@ -4306,10 +4241,8 @@ function showCopyFeedback(btnEl, success) {
 
 /* ── 查看全文覆盖层 ──────────────────────── */
 
-/* 获取覆盖层内容区的文本内容
-   @param {object} record 记录对象
-   @param {string} format 格式：'formatted' 或 'raw'
-   @returns {string} 文本内容 */
+/* 取覆盖层内容区的文本
+   @param {object} record @param {string} format formatted 或 raw @returns {string} */
 function getReadContent(record, format) {
     if (format === 'raw') {
         if (!record.rawBody) {
@@ -4534,10 +4467,8 @@ function ensureSharedResizeObserver() {
     });
 }
 
-/* 确保懒创建 IntersectionObserver 已创建
-   进度条只在内容区进入视口（或接近视口）时才创建，
-   避免展开 100+ 消息时瞬间创建 100+ 进度条导致的同步 layout 卡顿。
-   rootMargin 200px：提前创建，保证滚动到之前进度条已就绪。 */
+/* 懒创建 IntersectionObserver：进度条只在内容区接近视口时才建（rootMargin 200px），
+   避免展开 100+ 消息时瞬间创建大量进度条造成同步 layout 卡顿。 */
 function ensureScrollbarLazyObserver() {
     if (scrollbarLazyObserver) return;
     scrollbarLazyObserver = new IntersectionObserver((entries) => {
@@ -4552,11 +4483,9 @@ function ensureScrollbarLazyObserver() {
     }, { root: null, rootMargin: '200px 0px', threshold: 0 });
 }
 
-/* 请求更新进度条 thumb 位置（RAF 批处理）
-   - 不传参：全量更新所有活跃进度条（ResizeObserver 触发）
-   - 传 contentEl：只更新该元素对应的进度条（scroll 事件触发）
-   同一帧内多次请求合并为一次更新，避免高频事件触发连续强制 layout。
-   @param {HTMLElement} [contentEl] 需要更新的内容区元素；不传则全量更新 */
+/* 请求更新进度条 thumb 位置（RAF 批处理）：不传参＝全量更新，传 contentEl＝只更新该元素对应
+   进度条；同一帧内多次请求合并成一次，避免高频事件连续强制 layout。
+   @param {HTMLElement} [contentEl] */
 function requestThumbUpdate(contentEl) {
     if (contentEl) {
         thumbPendingElement = contentEl;
@@ -4623,10 +4552,8 @@ function updateScrollbarThumb(contentEl, cleanup) {
     thumb.style.top = thumbTop.toFixed(1) + 'px';
 }
 
-/* 为一批 .rmsg-content 元素按需（懒加载）创建进度条
-   元素进入视口或接近视口时才真正创建进度条。
-   已在观察队列中或有进度条的元素自动跳过。
-   @param {NodeListOf<HTMLElement>|HTMLElement[]|Array} contentEls 内容区元素集合 */
+/* 为一组 .rmsg-content 懒创建进度条（进入/接近视口才建；已在观察队列或已有进度条则跳过）
+   @param {NodeListOf<HTMLElement>|HTMLElement[]} contentEls */
 function queueScrollbarsForEls(contentEls) {
     ensureScrollbarLazyObserver();
     /* 支持 .rmsg-content（消息内容区）与 .rlog-read-content（查看全文覆盖层内容区） */
@@ -4837,11 +4764,8 @@ function detachScrollbarForContent(contentEl) {
     scrollbarCleanups.delete(contentEl);
 }
 
-/* 为列表中的所有 .rmsg-content 创建 overlay 进度条
-   用于 renderPanelContent 后挂载，也用于展开/折叠后刷新
-   改为懒创建：所有 .rmsg-content 进入视口（或接近视口）时才创建进度条，
-   避免展开/重新渲染大量消息时一次性创建大量进度条导致的卡顿。
-   @param {HTMLElement} listEl 列表容器元素 */
+/* 为列表内所有 .rmsg-content 创建/刷新进度条（renderPanelContent 后与展开/折叠后调用）。
+   懒创建：接近视口才建，避免一次性创建大量进度条卡顿。@param {HTMLElement} listEl */
 function attachScrollIndicators(listEl) {
     /* 清理所有已有进度条（因为 renderPanelContent 使用 innerHTML 重建了 DOM） */
     scrollbarCleanups.forEach((_, contentEl) => {
@@ -4854,9 +4778,10 @@ function attachScrollIndicators(listEl) {
 
 /* ── 面板控制 ─────────────────────────── */
 
-/* 浮标实际边长：桌面 36×36，移动端（≤768px）32×32（与 style.css 末尾媒体查询一致） */
+/* 浮标实际边长：桌面 BADGE_SIZE（34×34）、移动端（≤768px）BADGE_SIZE_MOBILE（30×30）；
+   尺寸走 inline 样式（浮标定位与越界校正需要具体像素值），style.css 里只调图标字号 */
 function getBadgeSize() {
-    return window.matchMedia('(max-width: 768px)').matches ? 32 : BADGE_SIZE;
+    return window.matchMedia('(max-width: 768px)').matches ? BADGE_SIZE_MOBILE : BADGE_SIZE;
 }
 
 /* 浮标在视口内的合法位置：入参为浮标左上角坐标，clamp 到视口内（保证浮标完全可见）。
@@ -4874,10 +4799,8 @@ function clampBadgeToViewport(left, top) {
     };
 }
 
-/* 「浮标默认入口」开启时，浮标在右上角的默认位置：
-   距右缘 BADGE_DEFAULT_MARGIN_RIGHT、在 ST 顶部设置栏下缘再往 BADGE_DEFAULT_MARGIN_TOP 处，
-   最后经 clampBadgeToViewport 兜底（保证不进顶栏、不出视口）。
-   仅用于启动/关闭面板后 badgePos 为空（或需重置）时的初始落位；拖动后 badgePos 接管。 */
+/* 「浮标默认入口」的默认落位：距右缘 BADGE_DEFAULT_MARGIN_RIGHT、ST 顶栏下缘再往下
+   BADGE_DEFAULT_MARGIN_TOP，最后经 clampBadgeToViewport 兜底；拖动后由 badgePos 接管。 */
 function getDefaultBadgePos() {
     const size = getBadgeSize();
     const topBarEl = document.getElementById('top-settings-holder');
@@ -4888,7 +4811,7 @@ function getDefaultBadgePos() {
     );
 }
 
-/* 浮标尺寸同步：host 的宽/高随桌面 36 / 移动 32 切换（getBadgeSize 已按断点返回）。
+/* 浮标尺寸同步：host 的宽/高随桌面 34 / 移动 30 切换（getBadgeSize 已按断点返回）。
    初始化与 resize 时调用，避免桌面↔移动切换后尺寸不同步。 */
 function updateBadgeSize() {
     if (!badgeEl) return;
@@ -4897,19 +4820,42 @@ function updateBadgeSize() {
     badgeEl.style.height = size + 'px';
 }
 
-/* 浮标主题变量：把原挂 #rlog-shadow-host 的三个浮标变量接到新的 light DOM host 上，
-   由 host 跨影子边界继承给 shadow root 内的 .rlog-badge-visual，配色仍跟随 ST 主题。 */
-function syncBadgeThemeVars() {
-    if (!badgeEl) return;
-    badgeEl.style.setProperty('--rlog-badge-bg', 'color-mix(in srgb, var(--SmartThemeQuoteColor, #52525b) 75%, transparent)');
-    badgeEl.style.setProperty('--rlog-badge-icon', '#ffffff');
-    badgeEl.style.setProperty('--rlog-badge-border', 'var(--SmartThemeQuoteColor, #52525b)');
+/* ST 当前是否深色主题：读 --SmartThemeBlurTintColor 算相对感知亮度 < 阈值判深色；
+   读不到/不认识/解析失败一律按深色（退回深色浮标，与 ST 默认主题方向一致）。@returns {boolean} */
+function isStThemeDark() {
+    let raw = '';
+    try {
+        raw = getComputedStyle(document.documentElement).getPropertyValue('--SmartThemeBlurTintColor').trim();
+    } catch (e) { /* 读取失败：按深色处理 */ }
+    const channels = parseCssColorChannels(raw);
+    if (!channels) return true;
+    return relativeLuminance(channels.r, channels.g, channels.b) < ST_THEME_DARK_LUMINANCE;
 }
 
-/* 重置面板为默认定位/尺寸：清掉此前拖拽/缩放写入的 inline 样式，让 CSS 默认值生效
-   （默认：top:80px + left:50% + translateX(-50%) + 宽高/上下限走 style.css 基准）。
-   不额外做边界修正：默认定位本就居中/贴边、在视口内（水平由 95vw 上限保证，
-   垂直仅极端小视口底部略超，与刷新后初始布局一致），无需防跑出界面。 */
+/* 同步浮标配色：浅色 ST → 深色浮标、深色 ST → 浅色浮标（始终反向，保证对比度）。
+   只在浮标宿主上加减 .rlog-badge-light，配色数值仍在总表；判定结果没变时不动 DOM，
+   免得无关写入打断配色过渡。 */
+function syncBadgeTheme() {
+    if (!badgeEl) return;
+    const isDark = isStThemeDark();
+    /* 状态与宿主类都已一致才跳过（多一道类检查：宿主重建后也能自愈） */
+    if (isDark === stThemeIsDark && badgeEl.classList.contains('rlog-badge-light') === isDark) return;
+    stThemeIsDark = isDark;
+    badgeEl.classList.toggle('rlog-badge-light', isDark);
+}
+
+/* 初始化浮标配色的主题跟随：先同步一次，再监听 <html> 的 style 属性（当前 ST 切主题/改色都会把
+   --SmartTheme* 写到那里，ST 没有主题变化事件）。挂点将来失效只表现为浮标配色不再更新（fail-safe）。 */
+function initBadgeThemeSync() {
+    syncBadgeTheme();
+    if (badgeThemeObserver) return;
+    badgeThemeObserver = new MutationObserver(() => syncBadgeTheme());
+    badgeThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
+}
+
+/* 重置面板为默认定位/尺寸：清掉拖拽/缩放写入的 inline 样式，让 CSS 默认值生效
+   （top:80px + left:50% + translateX(-50%) + 宽高/上下限走 style.css）。默认定位本就在视口内，
+   不做额外边界修正。 */
 function resetPanelToDefault() {
     if (!panelEl) return;
     panelEl.style.left = '';
@@ -4996,7 +4942,7 @@ function addMenuEntry() {
     toggleBtn = document.createElement('div');
     toggleBtn.id = 'prompt-capture-toggle';
     toggleBtn.className = 'list-group-item';
-    toggleBtn.innerHTML = '<i class="fa-solid fa-book"></i> 最近请求记录';
+    toggleBtn.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> 最近请求记录';
     toggleBtn.addEventListener('click', togglePanel);
     menu.appendChild(toggleBtn);
 
@@ -5027,10 +4973,8 @@ function closeFilterDrawer() {
     if (btn) btn.classList.remove('active-drawer-btn');
 }
 
-/* 切换抽屉时用：旧抽屉瞬时收起（跳过收起动画）。
-   原因：两个抽屉宽度叠加会先把整行撑宽再回落（左右弹跳）；切换时让旧抽屉直接消失、
-   新抽屉照常展开，就不会出现两者同时接近满宽的重叠。
-   做法：临时禁用过渡 → 移除展开类 → 强制回流提交瞬时收起 → 恢复过渡（与 tour.js 抽屉步骤同款写法）。 */
+/* 抽屉切换时旧抽屉瞬时收起（跳过动画）：两个抽屉宽度叠加会先把整行撑宽再回落（左右弹跳），
+   让旧的直接消失、新的照常展开即可避免。做法：禁用过渡 → 移除展开类 → 强制回流 → 恢复过渡。 */
 function closeDrawerInstant(drawer, btn) {
     if (!drawer) return;
     drawer.style.transition = 'none';
@@ -5052,14 +4996,18 @@ function getSelfCssUrl() {
 }
 
 /* 影子内样式源（优先）：从 ST 已加载的本插件 style.css <link> 的样式表规则同步拷贝成影子内 <style>。
-   这样影子内样式立即生效，避免用 <link> 异步加载导致早期测量（如状态占位宽度探针）采不到 class 样式。 */
+   这样影子内样式立即生效，避免用 <link> 异步加载导致早期测量（如状态占位宽度探针）采不到 class 样式。
+   面板影子根与浮标影子根各要一份（调用两次），规则序列化走 selfCssTextCache 只做一次。 */
 function buildSelfCssElement() {
     try {
         const selfCssUrl = getSelfCssUrl();
         const link = [...document.querySelectorAll('link[rel="stylesheet"]')].find(l => l.href === selfCssUrl);
         if (link && link.sheet && link.sheet.cssRules && link.sheet.cssRules.length) {
+            if (selfCssTextCache === null) {
+                selfCssTextCache = [...link.sheet.cssRules].map(r => r.cssText).join('\n');
+            }
             const style = document.createElement('style');
-            style.textContent = [...link.sheet.cssRules].map(r => r.cssText).join('\n');
+            style.textContent = selfCssTextCache;
             return style;
         }
     } catch (e) {
@@ -5086,11 +5034,9 @@ function buildFaShimStyle() {
     const faWoff2 = new URL('webfonts/fa-solid-900.woff2', location.href).href;
     const faTtf = new URL('webfonts/fa-solid-900.ttf', location.href).href;
     const rules = [
-        /* 影子内通用基准：ST 全局的 *{box-sizing:border-box;text-shadow:...} 等不进入影子，这里补上（去主题化）。
-           text-shadow 是可继承属性——ST 全局 * 会命中挂在 body 下的 shadow host，把主题算出的
-           text-shadow（某主题可把 --SmartThemeShadowColor/--shadowWidth 设成彩色辉光）经继承渗进影子，
-           必须在影子内重置为 none。其余则因 shadow 隔离丢了宿主全局基准，需一并补上，
-           否则元素默认 content-box、min-width/padding 计算会与旧版不一致（如状态占位槽位宽）。 */
+        /* 影子内通用基准：ST 全局 * 的 box-sizing/字体平滑等不进入影子，这里补上。
+           text-shadow 是可继承属性，ST 全局 * 会命中挂在 body 下的 shadow host 把主题辉光渗进来，
+           必须重置为 none；不补基准的话元素默认 content-box，min-width/padding 计算会与旧版不一致。 */
         '*,*::before,*::after{box-sizing:border-box;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;-webkit-tap-highlight-color:transparent;text-shadow:none}',
         '@font-face{font-family:"Font Awesome 6 Free";font-style:normal;font-weight:900;font-display:block;'
             + `src:url("${faWoff2}") format("woff2"),url("${faTtf}") format("truetype")}`,
@@ -5104,35 +5050,10 @@ function buildFaShimStyle() {
     return style;
 }
 
-/* 浮标视觉样式：浮标已拆成独立 light DOM host（#rlog-badge-host），可见视觉放在它自己的 shadow root 内。
-   - host 本身只负责定位/尺寸/光标/透明背景（走 inline 样式），不放视觉；
-   - 视觉（背景/边框/圆角/图标颜色/字号）全部由 shadow root 内 .rlog-badge-visual 提供，
-     第三方主题的普通 CSS 依然碰不到（继续受 Shadow DOM 隔离）；
-   - --rlog-badge-* 自定义属性由 syncBadgeThemeVars() 写到 host 上，跨影子边界继承给视觉元素，
-     配色仍跟随 ST 主题（--SmartThemeQuoteColor 引用文本色）。 */
-function buildBadgeStyle() {
-    const style = document.createElement('style');
-    style.textContent = [
-        ':host{box-sizing:border-box;background:transparent;border:0;padding:0;margin:0}',
-        '.rlog-badge-visual{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;'
-            + 'border-radius:6px;background:var(--rlog-badge-bg,#52525b);'
-            + 'border:1px solid var(--rlog-badge-border,#52525b);color:var(--rlog-badge-icon,#fff);'
-            + 'font-size:16px;cursor:pointer;user-select:none;-webkit-user-select:none}',
-        '@media(max-width:768px){.rlog-badge-visual{font-size:14px}}',
-    ].join('\n');
-    return style;
-}
-
-/* 影子内「极简模式」样式：通过 :host(.rlog-minimal) 一次性关闭面板/弹窗的全部过渡与动画。
-   用 :host 而不是 #rlog-panel 前缀，是因为设置上限/确认弹窗挂在 panelShadowRoot、
-   与 #rlog-panel 平级（不在面板内），只有 :host 能同时兜住面板与弹窗。
-   要点：
-   - 去掉全部 transition/animation（hover 渐变、抽屉滑出、箭头旋转、token 脉冲、
-     搜索框展开、主题呼吸、弹窗淡入、滚动条淡入淡出等），保留瞬时状态反馈；
-   - 去掉偏好浮层 1px 虚化（遮罩本身与半透明背景保留）；
-   - 显式豁免使用引导（.rlog-tour-*）：引导气泡淡入与小三角 left 平滑跟随照旧，
-     不受极简模式影响。此类规则不能写进外部 style.css（文档里的 :host 会被丢弃且拷不进影子），
-     只能在 JS 运行时注入影子。 */
+/* 影子内「极简模式」样式：用 :host(.rlog-minimal) 一次性关掉面板/弹窗的全部过渡与动画
+   （设置上限/确认弹窗与 #rlog-panel 平级，只有 :host 能同时兜住），保留瞬时状态反馈；
+   去掉偏好浮层的 1px 虚化；显式豁免使用引导（.rlog-tour-*）。
+   这类 :host 规则不能写进外部 style.css（文档里的 :host 会被丢弃、也拷不进影子），只能在 JS 运行时注入。 */
 function buildMinimalShimStyle() {
     const style = document.createElement('style');
     const rules = [
@@ -5261,6 +5182,13 @@ function buildUI() {
                         </div>
                         <div class="rlog-pref-item">
                             <div class="rlog-pref-item-text">
+                                <span class="rlog-pref-label">昼夜模式跟随 ST 主题</span>
+                                <div class="rlog-pref-item-desc">开启后，昼夜模式自动跟随亮暗主题切换<br>此模式下手动切换按钮不生效</div>
+                            </div>
+                            <button class="rlog-toggle" data-pref-key="followStTheme" role="switch" aria-checked="false" aria-label="昼夜模式跟随 ST 主题"></button>
+                        </div>
+                        <div class="rlog-pref-item">
+                            <div class="rlog-pref-item-text">
                                 <span class="rlog-pref-label">移动端默认全屏</span>
                                 <div class="rlog-pref-item-desc">阅读区域最大化，覆盖下一项设置<br>因为没有面板外区域了</div>
                             </div>
@@ -5306,11 +5234,10 @@ function buildUI() {
     panelShadowRoot.appendChild(panelEl);
     document.body.appendChild(shadowHostEl);
 
-    /* 浮标：拆成独立 light DOM host（#rlog-badge-host）+ 自己的 shadow root。
-       - host 暴露在普通 DOM，带 script_id/role/title/class/固定定位，供第三方收纳插件识别/收纳；
-       - 可见视觉放在 host 自己的 shadow root 内（.rlog-badge-visual），第三方主题 CSS 碰不到；
-       - 里面放一个隐藏的 light DOM 图标，方便收纳插件用 querySelector('i') 提取图标；
-       - host 只承担定位/尺寸/光标/透明背景，不放视觉。 */
+    /* 浮标：独立 light DOM host（#rlog-badge-host）+ 自己的 shadow root。
+       host 暴露在普通 DOM（带 script_id/role/title/class/固定定位）供第三方收纳识别；
+       可见视觉在 host 的 shadow root 内（.rlog-badge-visual），第三方主题碰不到；
+       另放一个不渲染的 light DOM 图标供收纳插件 querySelector(i) 提取。host 只承担定位/尺寸。 */
     badgeEl = document.createElement('div');
     badgeEl.id = 'rlog-badge-host';
     badgeEl.className = 'rlog-badge-host rlog-floating-button';
@@ -5321,23 +5248,28 @@ function buildUI() {
     badgeEl.style.cssText =
         `position:fixed;display:none;width:${getBadgeSize()}px;height:${getBadgeSize()}px;`
         + 'cursor:pointer;z-index:2999;box-sizing:border-box;background:transparent;border:0;padding:0;margin:0;';
-    /* 隐藏的 light DOM 图标：宿主有 shadow root，light 子元素默认不渲染，且带 hidden，双保险不显示 */
-    badgeEl.innerHTML = '<i class="fa-solid fa-book" hidden></i>';
+    /* light DOM 图标：供第三方收纳插件 querySelector(i) 读入口图标。宿主有自己的 shadow root，
+       light 子元素本就不参与渲染；hidden 只是意图声明——ST 的 FA CSS 会给 .fa-solid 设 display，
+       会盖过 [hidden]，别指望它保证不显形。 */
+    badgeEl.innerHTML = '<i class="fa-solid fa-clock-rotate-left" hidden></i>';
 
     const badgeShadowRoot = badgeEl.attachShadow({ mode: 'open' });
-    badgeShadowRoot.appendChild(buildBadgeStyle());
+    /* 浮标可见视觉的样式来源：本插件 style.css 的「13. 浮标」区
+       （与面板影子根同款做法——把同一份 style.css 复制进影子根，样式集中在 style.css 一处维护） */
+    badgeShadowRoot.appendChild(buildSelfCssElement());
     badgeShadowRoot.appendChild(buildFaShimStyle());
     badgeVisualEl = document.createElement('div');
     badgeVisualEl.className = 'rlog-badge-visual';
-    badgeVisualEl.innerHTML = '<i class="fa-solid fa-book"></i>';
+    badgeVisualEl.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i>';
     badgeShadowRoot.appendChild(badgeVisualEl);
     document.body.appendChild(badgeEl);
 
-    /* 把浮标主题变量挂到 host，并同步当前尺寸；然后交给指针交互 */
-    syncBadgeThemeVars();
+    /* 同步浮标当前尺寸，然后交给指针交互（配色由 style.css 里挂 #rlog-badge-host 的变量提供） */
     updateBadgeSize();
     initBadgeInteraction();
-    /* host 就绪后重放主题类（浮标可见视觉由 host 上的 --rlog-badge-* 提供） */
+    /* 浮标配色跟随 ST 亮暗主题（含后续主题切换的监听；配色取值仍在 style.css 变量总表） */
+    initBadgeThemeSync();
+    /* host 就绪后重放主题类（供面板/弹窗用；浮标配色由上面单独跟随 ST 主题） */
     applyTheme();
 
     /* H4 标题文字拆分：文字部分单击折叠/展开，数字部分双击设置最大记录数 */
@@ -5449,13 +5381,10 @@ function buildUI() {
         });
     }
 
-    /* 全局点击监听：开启「点击面板外关闭」偏好时，点在主面板之外就关闭整个面板。
-       要点：
-       - 影子 DOM 下面板/弹窗/偏好浮层内的点击会重定向到 #rlog-shadow-host，用
-         `e.target === shadowHostEl || e.composedPath().includes(panelEl)` 判定「面板内」；
-       - 点击插件自己的菜单切换按钮（#prompt-capture-toggle）要放行——否则用切换按钮
-         "打开面板"的那一次点击会立刻把面板关掉（该按钮在面板外，但属插件自身开关）；
-       - 偏好标志在点击时读取，无需随开关增删监听。 */
+    /* 全局点击监听：开启「点击面板外关闭」时，点在面板外就关面板。要点：
+       ① 影子内点击会重定向到 #rlog-shadow-host，用 e.target === shadowHostEl ||
+       e.composedPath().includes(panelEl) 判定面板内；② 放行插件自己的菜单切换按钮，否则用它
+       「打开面板」的那次点击会立刻把面板关掉；③ 偏好标志在点击时读取，无需增删监听。 */
     if (!document.rlogOutsideCloseListenerInstalled) {
         document.rlogOutsideCloseListenerInstalled = true;
         document.addEventListener('click', (e) => {
@@ -5545,7 +5474,7 @@ function buildUI() {
             });
         }
 
-        /* 每个 Toggle：点击翻转状态 + 持久化 + 更新入口图标态（4 项行为均已接入实际行为） */
+        /* 每个 Toggle：点击翻转状态 + 持久化 + 更新入口图标态（6 项行为均已接入实际行为） */
         const toggles = prefOverlayEl.querySelectorAll('.rlog-toggle');
         toggles.forEach((toggle) => {
             toggle.addEventListener('click', (e) => {
@@ -5575,6 +5504,9 @@ function buildUI() {
     updateMobileFullscreenClass();
     /* 极简模式：初始化时按偏好给影子宿主加/去类（触发 :host 极简规则，关掉全部动效） */
     updateMinimalClass();
+    /* 「昼夜模式跟随 ST 主题」：开启时静默同步到 ST 当前主题并挂上主题变化监听
+       （面板此刻 display:none，不播动画；之后打开面板直接用同步后的主题） */
+    initPanelThemeFollow(false);
     /* 筛选状态持久化：开启时读取上次持久化的筛选并覆盖默认真实状态（在 updateFilterChipUI 前生效） */
     loadPersistedFilterState();
     /* 「浮标默认入口」：开启时启动默认显示浮标（右上角默认位置），面板保持隐藏、非折叠态，
@@ -5589,51 +5521,17 @@ function buildUI() {
 
     panelEl.querySelector('#rlog-theme-btn').addEventListener('click', (e) => {
         e.stopPropagation();
+        /* 「昼夜模式跟随 ST 主题」开启时手动切换不生效：按钮交互不变（仍可点击、图标/title 不变），
+           只是不执行切换，并用插件自己的 toast 提示原因。 */
+        if (preferences.followStTheme) {
+            showPinToast('请先关闭自动跟随主题');
+            return;
+        }
         isLightTheme = !isLightTheme;
         saveTheme(isLightTheme);
         applyTheme();
         updateThemeButtonIcon();
-        
-        /* 触发主题切换专属缩放特效（不在打开窗口时触发） */
-        panelEl.classList.remove('rlog-anim-light', 'rlog-anim-dark');
-
-        /* 极简模式：主题已通过 applyTheme() 瞬时切换，跳过缩放呼吸/颜色渐变编排，
-           避免 animation:none 下 animationend 不触发导致动画类残留。 */
-        if (preferences.minimal) return;
-
-        /* 移动端（窄屏）禁用颜色过渡快速切换：大量展开消息时同时做 0.35s 渐变会明显卡顿， */
-        /* 主题色在双 RAF 后瞬间切换完成再播放缩放动画； */
-        /* 桌面端保留原有渐变特效（void offsetWidth 强制回流以重置动画状态）。 */
-        /* 注：禁用过渡不影响最终颜色，只是不播放颜色渐变过程。 */
-        const isMobile = window.matchMedia('(max-width: 768px)').matches;
-        if (isMobile) {
-            panelEl.classList.add('rlog-theme-transitioning');
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    panelEl.classList.remove('rlog-theme-transitioning');
-                    if (isLightTheme) {
-                        panelEl.classList.add('rlog-anim-light');
-                    } else {
-                        panelEl.classList.add('rlog-anim-dark');
-                    }
-                });
-            });
-        } else {
-            /* 桌面端：保留渐变过渡 + 强制回流重启动画 */
-            void panelEl.offsetWidth;
-            if (isLightTheme) {
-                panelEl.classList.add('rlog-anim-light');
-            } else {
-                panelEl.classList.add('rlog-anim-dark');
-            }
-        }
-
-        /* 动画结束后自动清除动画类，防止关闭再打开窗口时重新触发残留动画 */
-        const onAnimEnd = () => {
-            panelEl.classList.remove('rlog-anim-light', 'rlog-anim-dark');
-            panelEl.removeEventListener('animationend', onAnimEnd);
-        };
-        panelEl.addEventListener('animationend', onAnimEnd);
+        playThemeSwitchAnimation();
     });
     updateThemeButtonIcon();
 
@@ -5716,6 +5614,52 @@ function updateThemeButtonIcon() {
     btn.innerHTML = isLightTheme
         ? '<i class="fa-solid fa-moon"></i>'
         : '<i class="fa-solid fa-sun"></i>';
+}
+
+/* 昼/夜主题切换动画（缩放呼吸 + 颜色渐变）：只在主动切换时播放，不在打开窗口时触发；
+   昼/夜按钮与「跟随 ST 主题」自动切换复用同一段编排。
+   前提：调用前 isLightTheme 已更新、主题类已应用。 */
+function playThemeSwitchAnimation() {
+    if (!panelEl) return;
+    panelEl.classList.remove('rlog-anim-light', 'rlog-anim-dark');
+
+    /* 极简模式：主题已通过 applyTheme() 瞬时切换，跳过缩放呼吸/颜色渐变编排，
+       避免 animation:none 下 animationend 不触发导致动画类残留。 */
+    if (preferences.minimal) return;
+
+    /* 移动端（窄屏）禁用颜色过渡快速切换：大量展开消息时同时做 0.35s 渐变会明显卡顿， */
+    /* 主题色在双 RAF 后瞬间切换完成再播放缩放动画； */
+    /* 桌面端保留原有渐变特效（void offsetWidth 强制回流以重置动画状态）。 */
+    /* 注：禁用过渡不影响最终颜色，只是不播放颜色渐变过程。 */
+    const isMobile = window.matchMedia('(max-width: 768px)').matches;
+    if (isMobile) {
+        panelEl.classList.add('rlog-theme-transitioning');
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                panelEl.classList.remove('rlog-theme-transitioning');
+                if (isLightTheme) {
+                    panelEl.classList.add('rlog-anim-light');
+                } else {
+                    panelEl.classList.add('rlog-anim-dark');
+                }
+            });
+        });
+    } else {
+        /* 桌面端：保留渐变过渡 + 强制回流重启动画 */
+        void panelEl.offsetWidth;
+        if (isLightTheme) {
+            panelEl.classList.add('rlog-anim-light');
+        } else {
+            panelEl.classList.add('rlog-anim-dark');
+        }
+    }
+
+    /* 动画结束后自动清除动画类，防止关闭再打开窗口时重新触发残留动画 */
+    const onAnimEnd = () => {
+        panelEl.classList.remove('rlog-anim-light', 'rlog-anim-dark');
+        panelEl.removeEventListener('animationend', onAnimEnd);
+    };
+    panelEl.addEventListener('animationend', onAnimEnd);
 }
 
 function togglePanel() {
@@ -5961,10 +5905,9 @@ function initBadgeInteraction() {
     };
     badgeEl.addEventListener('pointerup', onBadgeUp);
     badgeEl.addEventListener('pointercancel', onBadgeUp);
-    /* 点击（含第三方对 host 直接触发的原生 click）：
-       - 拖拽后的补发 click 已被上面 badgeSuppressNextClick 守卫拦掉，不会走到这里；
-       - 这里只把「打开面板」延后到本次 click 全部派发完之后执行，保持浮标在该阶段可见；
-       - 不再主动 stopPropagation，让 click 正常冒泡，不挡住其他监听（各 state 已保证不会误关面板）。 */
+    /* 浮标 click（含第三方对 host 直接触发的原生 click）：拖拽后的补发 click 已被
+       badgeSuppressNextClick 拦掉；这里只把「打开面板」延后到本次 click 全部派发完之后，
+       保持浮标在该阶段可见；不主动 stopPropagation（各 state 已保证不会误关面板）。 */
     badgeEl.addEventListener('click', (e) => {
         /* 兜底：若拖拽后的 click 未被上游拦掉（极少数），这里再拦一次 */
         if (badgeSuppressNextClick) return;
@@ -6227,13 +6170,9 @@ window.__RLogApi = {
 /* number|null: 临时调试：覆盖回复超时时长（供 simulateReplyTimeout 模拟测试用，后续删除） */
 let replyTimeoutOverrideMs = null;
 
-/* 一键注入全部测试数据（临时功能，后续删除）：
-   1. 8 条 Token 区间记录（tier 0-7，验证区间颜色）
-   2. 1 条成功回复模拟记录（Succeed 标记）
-   3. 1 条失败回复模拟记录（Fail 标记，HTTP 500）
-   4. 触发超时模拟（真实 2 秒超时收尾 → Timeout 标记）
-   移动端：点击面板标题栏「更多」抽屉中的烧瓶图标按钮即可注入；
-   桌面端：也可在浏览器控制台执行 window.__RLogApi.injectTokenTierTest() */
+/* 一键注入全部测试数据（临时功能，后续删除）：8 条 Token 区间记录 + 成功/失败回复模拟 +
+   触发一次 2 秒超时收尾。入口：移动端点「更多」抽屉里的烧瓶按钮，桌面端也可在控制台执行
+   window.__RLogApi.injectTokenTierTest() */
 window.__RLogApi.injectTokenTierTest = function injectTokenTierTest() {
         /* 每个区间的典型 token 数（对应 getTokenTier 的边界） */
         const tierValues = [
@@ -6334,12 +6273,9 @@ window.__RLogApi.injectTokenTierTest = function injectTokenTierTest() {
             });
         }
     };
-    /* 临时调试功能（后续删除）：模拟「回复 5 分钟超时」。
-       真实 5 分钟很难遇到，这里把超时临时缩短为 2 秒：
-       创建一条「请求已发、回复永不返回」的记录，2 秒后走真实的超时收尾流程，
+    /* 临时调试功能（后续删除）：模拟回复超时——把 5 分钟缩短成 2 秒，走真实超时收尾流程，
        记录出现 Timeout 标记并保留已收到的半截内容（若有）。
-       @param {object} [opts] { reasoning, content } 模拟已收到的半截思考/正文
-       @returns {number|null} 模拟记录的 captureId（总开关关闭时返回 null） */
+       @param {object} [opts] { reasoning, content } @returns {number|null} captureId */
 
 window.__RLogApi.simulateReplyTimeout = function simulateReplyTimeout(opts = {}) {
         if (!masterEnabled) {
