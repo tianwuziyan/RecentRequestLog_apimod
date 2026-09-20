@@ -5,18 +5,19 @@
 /* 【区块索引】（按文件从上到下的顺序）
    1. 可调参数          引导交互的数值常量（延时、边距等），调参只改这里
    2. 状态变量          引导运行期间的内存状态（当前步、UI 元素引用、记录备份等）
-   3. 引导步骤配置      13 个引导步骤的声明：目标元素、文案、行为引用（新增步骤改这里）
-   4. 步骤行为辅助函数  步骤配置引用的具名动作（开/关抽屉、预览、搜索），与步骤一一对应
-   5. 版本检查与启动    获取 manifest 版本号，与本地「已看版本」比对后决定是否展示引导
-   6. 引导生命周期      开始 / 结束 / 切换步骤，含引导期间真实记录的备份与恢复
-   7. UI 创建与展示     遮罩 / 高亮框 / 气泡的创建，气泡内容构建与事件绑定
-   8. 高亮与气泡定位    高亮框与气泡的几何位置计算（positionElements）
-   9. 对外 API          暴露给 index.js 调用的 window.__RLogTour
+   3. 面板访问助手      经 __RLogApi 走影子根取面板节点 / 在面板内查询
+   4. 引导步骤配置      13 个引导步骤的声明：目标元素、文案、行为引用（新增步骤改这里）
+   5. 步骤行为辅助函数  步骤配置引用的具名动作（开/关抽屉、预览、搜索），与步骤一一对应
+   6. 版本检查与启动    获取 manifest 版本号，与本地「已看版本」比对后决定是否展示引导
+   7. 引导生命周期      开始 / 结束 / 切换步骤，含引导期间真实记录的备份与恢复
+   8. UI 创建与展示     遮罩 / 高亮框 / 气泡的创建，气泡内容构建与事件绑定
+   9. 高亮与气泡定位    高亮框与气泡的几何位置计算（positionElements）
+   10. 对外 API         暴露给 index.js 调用的 window.__RLogTour
    ============================================================ */
 
 (function () {
     /* ── 可调参数 ───────────────────────────────────────────── */
-    /* 与 CSS 变量总表对应：引导交互的数值集中在这里，调参只改此区。 */
+    /* 与 CSS 变量总表对应：引导交互的数值集中在这里。 */
     const START_DELAY_MS = 100;          /* 引导开始等待延时：先等 DOM 与过渡动画稳定，再显示第一步 */
     const TARGET_RETRY_DELAY_MS = 100;   /* 目标元素重试延时：找不到目标元素（如搜索框动态创建）时的重试间隔 */
     const TARGET_RETRY_MAX = 3;          /* 目标元素最大重试次数：超过后跳过该步，避免 DOM 一直未就绪时卡住引导 */
@@ -61,7 +62,7 @@
 
     /* ── 引导步骤配置 ───────────────────────────────────────── */
     /* 每个步骤 = 目标元素 + 文案 + 可选项；需要行为（开抽屉/预览/搜索等）的步骤
-       引用下方「步骤行为辅助函数」区里的具名函数，新增步骤时复制一个对象即可。 */
+       引用下方「步骤行为辅助函数」区里的具名函数。 */
     const steps = [
         {
             targetSelector: '.rlog-title-text',
@@ -119,8 +120,7 @@
         {
             targetSelector: '.rlog-search-box',
             desc: '• 点击 🔍︎ ，输入关键字进行搜索<br>• 点击箭头或按 Enter/Shift+Enter 在结果间跳转<br>• 再次点击 🔍︎ 可退出搜索',
-            /* 自定义高亮框：左边缘对齐放大镜按钮左边缘（自动适配桌面 24px / 移动端 20px 按钮宽度），
-               裁剪上下各 8px 点击防护区 */
+            /* 自定义高亮框：左边缘对齐放大镜按钮左边缘，上下裁剪点击防护区 */
             highlightAdjust: {
                 leftAlignTo: '.rlog-search-btn',
                 topExtra: 8,
@@ -160,8 +160,7 @@
         setDrawerState(false);
     }
 
-    /* 筛选抽屉步骤：进入时打开「筛选」抽屉、离开时关闭。
-       与抽屉步骤同理：临时禁用 transition，避免高亮框位置跳动。 */
+    /* 筛选抽屉步骤：进入时打开「筛选」抽屉、离开时关闭 */
     function setFilterDrawerState(open) {
         const drawer = q('#rlog-filter-drawer');
         if (drawer) drawer.style.transition = 'none';
@@ -186,7 +185,7 @@
     /* 内容预览步骤：进入时展开 demo 记录/消息并开启内容预览，离开时关闭预览 */
     function enterPreviewStep() {
         if (window.__RLogApi && window.__RLogApi.expandDemo) {
-            window.__RLogApi.expandDemo(); /* 确保记录和消息展开 */
+            window.__RLogApi.expandDemo();
         }
         if (window.__RLogApi && window.__RLogApi.forcePreview) {
             window.__RLogApi.forcePreview(true);
@@ -201,12 +200,8 @@
 
     /* 搜索步骤：进入时打开搜索框并搜索「示例」，离开时关闭搜索 */
     function enterSearchStep() {
-        /* demo 已在 startTour 中注入（始终注入），这里无需再检查列表是否为空。
-           打开搜索框并搜索「示例」（demo 数据包含该词，确保有匹配结果）
-           注意：不要在 openSearchForRecord 之前或之后调用 expandDemo/injectDemo 等方法，
-           它们会触发 renderPanelContent() → resetSearchIfActive() 移除刚创建的搜索框。
-           openSearchForRecord/performSearch/closeSearch 在 index.js 中非全局作用域，
-           需要通过 __RLogApi 访问。 */
+        /* 注意：不要在 openSearchForRecord 之前或之后调用 expandDemo/injectDemo 等方法，
+           它们会触发 renderPanelContent() → resetSearchIfActive() 移除刚创建的搜索框。 */
         if (window.__RLogApi && typeof window.__RLogApi.openSearchForRecord === 'function') {
             window.__RLogApi.openSearchForRecord(0);
         }
@@ -228,11 +223,10 @@
     }
 
     /* ── 版本检查与启动 ─────────────────────────────────────── */
-    /* 动态获取 manifest.json 的版本号，写入 currentTourVersion。
-       获取失败时保持兜底版本（见上方「兜底版本号」说明），由调用方决定是否展示引导。 */
+    /* 动态获取 manifest.json 的版本号并写入 currentTourVersion；
+       获取失败时保持兜底版本（见上方「兜底版本号」说明）。 */
     async function loadManifestVersion() {
         try {
-            /* 尝试动态获取 manifest.json 的路径 */
             let manifestUrl = '/scripts/extensions/third-party/RecentRequestLog/manifest.json';
             const scripts = document.getElementsByTagName('script');
             for (let i = 0; i < scripts.length; i++) {
@@ -242,7 +236,6 @@
                 }
             }
 
-            /* 加上时间戳防止缓存 */
             const response = await fetch(`${manifestUrl}?t=${Date.now()}`, { cache: 'no-cache' });
             if (response.ok) {
                 const manifest = await response.json();
@@ -268,11 +261,9 @@
     function startTour() {
         if (isActive) return;
 
-        /* 面板必须是可见的才能进行引导 */
         const panel = getPanel();
         if (!panel || panel.style.display === 'none') return;
 
-        /* 如果处于折叠状态，先展开面板 */
         if (panel.classList.contains('rlog-window-collapsed')) {
             const titleText = panel.querySelector('.rlog-title-text');
             if (titleText) titleText.click();
@@ -291,14 +282,9 @@
         isActive = true;
         currentStep = 0;
 
-        /* 引导期间只展示演示记录（demo），不展示真实记录：
-           1. 备份当前真实记录列表到 savedRecords
-           2. 标记引导进行中（此后新到达的记录只暂存、不显示，由 index.js 处理）
-           3. 清空列表（setRecords([])）
-           4. 注入 demo（unshift 至最前，所有 data-record-index="0" 步骤均作用于 demo）
-           这样保证引导各步骤的 DOM 完全可控，避免列表有真实记录时
-           最后一步「复制单条消息」定位到不可控的真实记录导致选框错位。
-           endTour 中会移除 demo 并恢复 savedRecords。 */
+        /* 引导期间只展示 demo、不展示真实记录（demo 置于第 0 条，带 data-record-index="0"
+           的步骤都作用于它），真实记录与筛选状态先备份、结束后由 endTour 恢复。
+           这样各步骤的 DOM 完全可控，避免最后一步「复制单条消息」定位到真实记录而错位。 */
         if (window.__RLogApi) {
             const api = window.__RLogApi;
             /* 备份筛选状态并重置为全开：demo 记录必须可见，引导步骤定位才可靠 */
@@ -326,7 +312,6 @@
 
         createUI();
 
-        /* 稍微延迟一下以等待 DOM 和过渡动画完成 */
         setTimeout(() => {
             executeStep(currentStep);
         }, START_DELAY_MS);
@@ -335,17 +320,14 @@
     function endTour() {
         if (!isActive) return;
 
-        /* 执行最后一步的 onLeave */
         if (steps[currentStep] && typeof steps[currentStep].onLeave === 'function') {
             steps[currentStep].onLeave();
         }
 
         isActive = false;
 
-        /* 记录版本号 */
         localStorage.setItem(STORAGE_KEY, currentTourVersion);
 
-        /* 移除 UI */
         if (overlay) overlay.remove();
         if (tooltip) tooltip.remove();
         if (highlightBox) highlightBox.remove();
@@ -354,33 +336,26 @@
         tooltip = null;
         highlightBox = null;
 
-        /* 恢复引导前的记录列表 + 引导期间暂存的新记录：
-           - 引导期间新到达的记录被 index.js 暂存（不显示），这里先取出，
-             再与引导前备份合并恢复（新记录在前、旧记录在后，符合「最新在上」的展示顺序）
-           - 若引导前无记录（savedRecords 为空数组）→ 只恢复引导期间的新记录
-           使用 requestAnimationFrame 延迟到下一帧恢复：让引导 UI 移除先完成渲染（立即反馈），
-           再执行重量级的列表恢复渲染（极端场景 100 条记录 × 100+ 消息时，全量重建可能数百 ms）。
-           这样用户点击「完成」后引导气泡先消失，列表在下一次渲染帧中恢复，避免同步阻塞卡死 UI。 */
+        /* 恢复引导前的记录列表 + 引导期间暂存的新记录（新记录在前、旧记录在后，符合「最新在上」）。
+           用 requestAnimationFrame 延后到下一帧：让引导 UI 的移除先完成渲染（立即反馈），
+           再做重量级的列表恢复，避免点击「完成」后同步阻塞 UI。 */
         if (savedRecords !== null && window.__RLogApi && typeof window.__RLogApi.setRecords === 'function') {
             const recordsBeforeTour = savedRecords;
             savedRecords = null;
             requestAnimationFrame(() => {
                 const api = window.__RLogApi;
                 if (api && typeof api.setRecords === 'function') {
-                    /* 先取出引导期间暂存的新记录（延迟到恢复前一刻再取，
-                       避免 rAF 间隙中新到达的记录漏进旧列表后被覆盖丢失） */
+                    /* 延迟到恢复前一刻再取，避免 rAF 间隙中新到达的记录被旧列表覆盖丢失 */
                     let pendingRecords = [];
                     if (typeof api.drainTourPendingRecords === 'function') {
                         pendingRecords = api.drainTourPendingRecords();
                     }
-                    /* 引导期间有新记录到达时，与正常 addRecord 行为保持一致：
-                       新记录到达会折叠所有已有记录（仅折叠记录本身，子消息展开状态不变）。
-                       无新记录到达时保持引导前状态原样恢复，不扰动用户的展开状态。 */
+                    /* 有新记录时与正常 addRecord 一致：折叠所有已有记录（只折叠记录本身，
+                       子消息展开状态不变）；无新记录时保持引导前状态原样恢复。 */
                     if (pendingRecords.length > 0) {
                         recordsBeforeTour.forEach(r => { r.collapsed = true; });
                     }
                     api.setRecords(pendingRecords.concat(recordsBeforeTour));
-                    /* 恢复引导前的筛选状态 */
                     if (savedFilterState !== null && typeof api.setFilterState === 'function') {
                         api.setFilterState(savedFilterState);
                         savedFilterState = null;
@@ -406,14 +381,12 @@
             return;
         }
 
-        /* 执行上一步的 onLeave */
         if (steps[currentStep] && currentStep !== nextIndex && typeof steps[currentStep].onLeave === 'function') {
             steps[currentStep].onLeave();
         }
 
         currentStep = nextIndex;
 
-        /* 执行当前步的 onEnter */
         if (steps[currentStep] && typeof steps[currentStep].onEnter === 'function') {
             steps[currentStep].onEnter();
         }
@@ -424,15 +397,12 @@
 
     /* ── UI 创建与展示 ──────────────────────────────────────── */
     function createUI() {
-        /* 遮罩层 */
         overlay = document.createElement('div');
         overlay.className = 'rlog-tour-overlay';
 
-        /* 高亮框 */
         highlightBox = document.createElement('div');
         highlightBox.className = 'rlog-tour-highlight';
 
-        /* 提示气泡 */
         tooltip = document.createElement('div');
         tooltip.className = 'rlog-tour-tooltip';
 
@@ -458,7 +428,6 @@
         }
     }
 
-    /* 构建气泡内容：关闭按钮 + 描述 + 圆点 + 上一步/跳过/下一步按钮 */
     function buildTooltipHtml(index) {
         const step = steps[index];
         const isLast = index === steps.length - 1;
@@ -478,7 +447,6 @@
         `;
     }
 
-    /* 绑定气泡按钮与圆点事件：上一步/下一步/跳过/关闭/圆点跳转 */
     function bindTooltipEvents() {
         const btnPrev = tooltip.querySelector('.rlog-tour-prev');
         const btnNext = tooltip.querySelector('.rlog-tour-next');
@@ -490,7 +458,6 @@
         if (btnSkip) btnSkip.addEventListener('click', (e) => { e.stopPropagation(); endTour(); });
         if (btnClose) btnClose.addEventListener('click', (e) => { e.stopPropagation(); endTour(); });
 
-        /* 绑定圆点点击跳转事件 */
         const dots = tooltip.querySelectorAll('.rlog-tour-dot');
         dots.forEach(dot => {
             dot.addEventListener('click', (e) => {
@@ -509,7 +476,7 @@
         const targetEl = panel ? panel.querySelector(step.targetSelector) : null;
 
         if (!targetEl) {
-            /* 如果找不到目标元素，延迟重试（等待 DOM 稳定，如搜索框动态创建） */
+            /* 找不到目标元素时延迟重试（等待 DOM 稳定，如搜索框动态创建） */
             if (findTargetRetryCount < TARGET_RETRY_MAX) {
                 findTargetRetryCount++;
                 setTimeout(() => {
@@ -526,13 +493,10 @@
         }
         findTargetRetryCount = 0;
 
-        /* 更新提示气泡内容 */
         tooltip.innerHTML = buildTooltipHtml(index);
 
-        /* 绑定按钮事件 */
         bindTooltipEvents();
 
-        /* 定位高亮框和气泡 */
         positionElements(targetEl, step);
     }
 
@@ -562,9 +526,8 @@
            topExtra/bottomExtra 为正表示向内收缩（裁剪），为负表示向外扩展 */
         if (step.highlightAdjust) {
             const adj = step.highlightAdjust;
-            /* leftAlignTo：左边界精确对齐指定锚点元素的左边缘（如放大镜按钮）。
-               动态读取锚点实际位置，自动适配桌面 24px / 移动端 20px 的按钮宽度差异，
-               避免写死固定偏移（固定偏移在移动端会多出 4px 误差）。 */
+            /* leftAlignTo：左边界对齐锚点元素（如放大镜按钮）左边缘，
+               动态读取实际位置以适配不同按钮宽度，避免写死固定偏移。 */
             if (adj.leftAlignTo) {
                 const anchorEl = targetEl.parentElement
                     ? targetEl.parentElement.querySelector(adj.leftAlignTo)
@@ -572,8 +535,8 @@
                 if (anchorEl) {
                     const anchorRect = anchorEl.getBoundingClientRect();
                     const anchorLeft = anchorRect.left - panelRect.left;
-                    /* 左边界 = 锚点左边缘（精确对齐，无额外 padding），
-                       右边界保持 = 原目标右边缘 + padding（与上下 padding 语义一致） */
+                    /* 左边界 = 锚点左边缘（无额外 padding）；
+                       右边界保持原目标右边缘 + padding（与上下 padding 语义一致） */
                     boxLeft = anchorLeft;
                     boxWidth = (left + width + padding) - anchorLeft;
                 }
@@ -587,18 +550,16 @@
             }
         }
 
-        /* 定位高亮框 */
         highlightBox.style.boxSizing = ''; /* 恢复默认，防止残留的 border-box 影响 */
         highlightBox.style.top = `${boxTop}px`;
         highlightBox.style.left = `${boxLeft}px`;
         highlightBox.style.width = `${boxWidth}px`;
         highlightBox.style.height = `${boxHeight}px`;
 
-        /* 显示气泡（必须先 display:block 才能获取尺寸） */
+        /* 气泡须先置为显示才能取到尺寸，因此延后一帧再定位 */
         tooltip.style.display = 'block';
         tooltip.style.opacity = '1';
 
-        /* 延迟一下定位气泡，确保能拿到正确的 offsetHeight */
         requestAnimationFrame(() => {
             const tooltipWidth = tooltip.offsetWidth;
             const tooltipHeight = tooltip.offsetHeight;
@@ -611,7 +572,7 @@
                 tooltip.classList.add('rlog-tour-top');
             } else {
                 /* 默认 placement 为 bottom */
-                tooltipTop = top + height + padding + TOOLTIP_ARROW_GAP; /* 气泡小三角的间距 */
+                tooltipTop = top + height + padding + TOOLTIP_ARROW_GAP;
                 tooltip.classList.remove('rlog-tour-top');
             }
 
@@ -629,7 +590,7 @@
                 arrowLeft = targetRect.left - panelRect.left - tooltipLeft + targetRect.width / 2;
             }
 
-            /* 限制小三角不要超出气泡边界（保留距离边缘 24px，防止长在圆角外面或者浮空） */
+            /* 限制小三角不要超出气泡边界（防止长在圆角外面或浮空） */
             if (arrowLeft > tooltipWidth - ARROW_EDGE_LIMIT) arrowLeft = tooltipWidth - ARROW_EDGE_LIMIT;
             if (arrowLeft < ARROW_EDGE_LIMIT) arrowLeft = ARROW_EDGE_LIMIT;
 

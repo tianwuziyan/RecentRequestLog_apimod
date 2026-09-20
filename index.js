@@ -8,8 +8,9 @@
    3. 状态变量           面板/数据/搜索/回复追踪等运行时内存状态
    4. 工具函数           无副作用的纯函数（转义/模型名/token/角色映射等）
    5. AI 请求体结构验证  判断请求体是否为 AI 生成请求
-   6. 请求来源识别       原生入口监听与来源推断（原生/插件）
-   7. Fetch 请求拦截     网络层捕获请求体（parse/process/install，含同源 iframe 扩展）
+   6. 请求来源识别       主生成轮次跟踪 + 证据分层判定（信封→E1→E2→X2-X5→E3→兜底→默认插件）
+                         + 响应落楼后的有限提升修正；旧原生入口监听保留为最低优先级兜底
+   7. 请求拦截（fetch + XHR）  网络层捕获请求体（parse/process/install + XHR 包装，含同源 iframe 扩展）
    8. 回复追踪与解析     回复捕获/SSE 解析/错误提取/终态挂载
    9. 数据管理           记录增删、去重指纹、条数上限
    10. 持久化设置        总开关/内容预览/主题/最大记录数/偏好设置读写
@@ -55,12 +56,12 @@ const STORAGE_THEME_KEY = `${PLUGIN_KEY}_theme`;
 const STORAGE_MASTER_KEY = `${PLUGIN_KEY}_masterEnabled`;
 const STORAGE_MAX_RECORDS_KEY = `${PLUGIN_KEY}_maxRecords`;  /* 持久化最大记录数 */
 const STORAGE_PREVIEW_KEY = `${PLUGIN_KEY}_contentPreview`;  /* 持久化内容预览开关 */
-const STORAGE_PREF_MOBILE_FULL = `${PLUGIN_KEY}_prefMobileFull`;      /* 偏好：移动端全屏（已实现：移动端打开面板自动铺满全屏） */
-const STORAGE_PREF_CLICK_OUTSIDE = `${PLUGIN_KEY}_prefClickOutside`;  /* 偏好：点击插件面板外关闭整个面板（已实现：双端点击面板外即关闭） */
-const STORAGE_PREF_FILTER_PERSIST = `${PLUGIN_KEY}_prefFilterPersist`; /* 偏好：筛选状态持久化（已实现：开启后跨页面保留筛选状态） */
-const STORAGE_PREF_MINIMAL = `${PLUGIN_KEY}_prefMinimal`;            /* 偏好：极简模式（已实现：开启后去掉过渡/动画/平滑滚动/闪烁/浮层虚化） */
-const STORAGE_PREF_BADGE_DEFAULT = `${PLUGIN_KEY}_prefBadgeDefault`; /* 偏好：浮标默认入口（已实现：开启后插件启动默认显示浮标，右上角默认位置） */
-const STORAGE_PREF_FOLLOW_ST_THEME = `${PLUGIN_KEY}_prefFollowStTheme`; /* 偏好：昼夜模式跟随 ST 主题（已实现：开启后主面板亮暗自动跟随 ST 主题） */
+const STORAGE_PREF_MOBILE_FULL = `${PLUGIN_KEY}_prefMobileFull`;      /* 偏好：移动端全屏（移动端打开面板自动铺满全屏） */
+const STORAGE_PREF_CLICK_OUTSIDE = `${PLUGIN_KEY}_prefClickOutside`;  /* 偏好：点击插件面板外关闭整个面板（双端生效） */
+const STORAGE_PREF_FILTER_PERSIST = `${PLUGIN_KEY}_prefFilterPersist`; /* 偏好：筛选状态持久化（开启后跨页面保留筛选状态） */
+const STORAGE_PREF_MINIMAL = `${PLUGIN_KEY}_prefMinimal`;            /* 偏好：极简模式（去掉过渡/动画/平滑滚动/闪烁/浮层虚化） */
+const STORAGE_PREF_BADGE_DEFAULT = `${PLUGIN_KEY}_prefBadgeDefault`; /* 偏好：浮标默认入口（启动默认显示浮标，右上角默认位置） */
+const STORAGE_PREF_FOLLOW_ST_THEME = `${PLUGIN_KEY}_prefFollowStTheme`; /* 偏好：昼夜模式跟随 ST 主题（主面板亮暗自动跟随 ST 主题） */
 const STORAGE_FILTER_STATE_KEY = `${PLUGIN_KEY}_filterState`;        /* 持久化的筛选状态对象（仅当「筛选状态持久化」偏好开启时读写） */
 const NATIVE_INTENT_WINDOW_MS = 5000;
 const BADGE_SIZE = 34;               /* 浮标边长(px)：桌面端 34×34 */
@@ -72,6 +73,20 @@ const LONG_PRESS_MS = 550;            /* 长按判定阈值(ms)：按下超过�
 const LONG_PRESS_MOVE_TOLERANCE = 8;  /* 长按移动容差(px)：按下后位移超过该值取消长按 */
 const PIN_TOAST_DURATION_MS = 1800;   /* 置顶/取消置顶提示自动消失时间(ms) */
 const ST_THEME_DARK_LUMINANCE = 0.5;  /* ST 主题背景色相对感知亮度低于该值视为深色主题（浮标改用浅色一套） */
+
+/* ── 请求来源识别（证据分层判定，RQ-32）相关常量 ── */
+const SOURCE_PLUGIN_DEFAULT_DETAIL = '插件/非原生请求'; /* 判「插件」时的悬停说明（沿用既有文案，值域不变） */
+const ST_CHAT_COMPLETION_ENDPOINT = '/api/backends/chat-completions/generate'; /* X3「请求地址」比对用的 ST 聊天补全端点路径 */
+const PASS_MAX_AGE_MS = 5 * 60 * 1000;        /* 主生成轮次最长存活时间(ms)：兜底清除「结束事件丢失」导致的悬挂轮次 */
+const SOURCE_CORRECTION_WINDOW_MS = 5000;     /* 修正触发窗口(ms)：响应定稿与 ST 消息事件间隔超过该值不再修正 */
+const SOURCE_CORRECTION_RETRY_MS = 400;       /* 修正短延迟重试(ms)：消息事件先到、响应还没读完时补一次 */
+const SOURCE_CORRECTION_PENDING_TTL_MS = 15000; /* 待修正记录保留时长(ms)：超出后不再尝试修正 */
+const SOURCE_CORRECTION_PENDING_GRACE_MS = 1000; /* 待修正记录宽限(ms)：刚登记的记录还没进列表时不按成员关系清理 */
+const SOURCE_CORRECTION_MIN_OVERLAP = 24;     /* 修正匹配的最小重叠长度(字符)：短于此长度只认完全相等 */
+
+/* ── 原始请求体敏感字段遮蔽 ── */
+const SENSITIVE_BODY_FIELDS = ['proxy_password'];
+const SENSITIVE_BODY_MASK = '***';
 
 /* 影子内 FA 固壳：仅插件实际使用的 33 个实心图标（content 取自 ST 现版 fontawesome.min.css 6.5.2，非猜测）
    新增图标时在此补一行「图标名: '\\fXXX'」即可 */
@@ -149,6 +164,20 @@ const AI_GENERATION_BODY_KEYS = new Set([
     'logit_bias', 'seed',
 ]);
 
+/* RegExp: 信封式请求「URL 形状」预筛 —— http(s):// + 生成路径关键词（大小写不敏感）。
+   关键词复用 AI_GENERATION_PATH_PATTERNS；字符类排除引号/空白/反斜杠，保证匹配到的是一个
+   完整地址串而不是跨字段的文本。 */
+const ENVELOPE_URL_SHAPE_RE = new RegExp(
+    'https?://[^\\s"\'`\\\\]*(?:'
+        + AI_GENERATION_PATH_PATTERNS.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+        + ')',
+    'i'
+);
+
+/* object: 信封解包命中后强制使用的来源（判定按设计是终局的：不参与证据分层判定，
+   也不参与「响应落楼修正」） */
+const ENVELOPE_PROXY_SOURCE = { type: 'plugin', label: '插件', detail: '插件代理请求', rule: 'envelope' };
+
 /* number: 回复追踪超时（5 分钟）：超时未结束即停止追踪并标记 Timeout */
 const REPLY_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -204,28 +233,27 @@ let panelShadowRoot = null;
 let shadowHostEl = null;
 
 /* HTMLElement|null: 浮标 light DOM 宿主（收起面板后的小型插件入口）。
-   新版拆成独立 light DOM host（#rlog-badge-host）并挂到 document.body，
-   供第三方收纳插件识别/收纳；可见视觉在其自己的 shadow root 内（.rlog-badge-visual）。 */
+   独立 host 挂在 document.body，供第三方收纳插件识别/收纳；
+   可见视觉在其自己的 shadow root 内（.rlog-badge-visual）。 */
 let badgeEl = null;
 
-/* HTMLElement|null: 浮标可见视觉元素（挂在 badgeEl 自己的 shadow root 内）。
-   document 查找不到，仅供 __RLogApi.getBadgeVisualEl() 等测试辅助使用。 */
+/* HTMLElement|null: 浮标可见视觉元素（挂在 badgeEl 自己的 shadow root 内，
+   document 查找不到，仅供 __RLogApi.getBadgeVisualEl() 等测试辅助使用） */
 let badgeVisualEl = null;
 
 /* string|null: style.css 规则序列化结果缓存（面板与浮标两个影子根各要一份 <style> 节点，
-   规则文本只序列化一次；null 表示尚未构建过） */
+   规则文本只序列化一次） */
 let selfCssTextCache = null;
 
 /* {left,top}|null: 浮标会话内位置（浮标左上角坐标）。
-   首次收起记录点击坐标，拖动后更新，再次收起复用；页面刷新/重新初始化时随模块重载自动清空。 */
+   首次收起记录点击坐标，拖动后更新，再次收起复用；刷新即清。 */
 let badgePos = null;
 
 /* boolean: 是否拦截「点击浮标恢复面板」后浏览器派发的原生 click（一次性标记）。
    浮标隐藏、面板出现在同一坐标时，该 click 会 hit-test 到面板标题栏按钮，可能误开抽屉。 */
 let badgeSuppressNextClick = false;
 
-/* boolean: ST 当前是否深色主题（浮标配色取其反：深色 ST → 浅色浮标）。
-   由 syncBadgeTheme() 按 ST 主题背景色亮度判定并维护，判定结果未变时不重复动浮标。 */
+/* boolean: ST 当前是否深色主题（浮标配色取其反：深色 ST → 浅色浮标），由 syncBadgeTheme() 维护 */
 let stThemeIsDark = false;
 
 /* MutationObserver|null: 监听 <html> 的 style 属性变化以感知 ST 主题切换（见 initBadgeThemeSync） */
@@ -237,9 +265,8 @@ let toggleBtn = null;
 /* boolean: 面板是否可见 */
 let isPanelVisible = false;
 
-/* @type {boolean} 面板内容是否需要重建（数据变化时置 true，渲染完成后清 false）
-   面板隐藏时 DOM 完整保留；只有数据/渲染设置变化时才在下次打开时重建 DOM，
-   避免展开大量消息时每次打开面板都全量重建造成卡顿。 */
+/* @type {boolean} 面板内容是否需要重建（数据/渲染设置变化时置 true，渲染完成后清 false）。
+   面板隐藏时 DOM 保留，避免每次打开都全量重建造成卡顿。 */
 let panelContentDirty = true;
 
 /* boolean: 是否为明亮模式 */
@@ -282,8 +309,6 @@ let originalFetch = null;
 /* Function|null: 当前安装的 fetch 包装函数 */
 let currentHook = null;
 
-/* 注：fetch 重入保护改为每个 realm（主窗口/iframe）独立，见 createFetchHook。 */
-
 /* WeakMap<Window, Function>: 已安装 fetch 包装的窗口 → 包装函数（主窗口 + 同源 iframe）
    用途：① 防止同一窗口重复包装破坏原有 fetch 包装链；
         ② 包装被 iframe 内部脚本替换后据此刻断是否需要重新包装。 */
@@ -292,8 +317,18 @@ const hookedFetchHooks = new WeakMap();
 /* WeakSet<HTMLIFrameElement>: 已挂「重载后重装包装」监听的 iframe 元素（防重复挂监听） */
 const iframeLoadListenersAttached = new WeakSet();
 
-/* boolean: iframe fetch 包装（初始扫描 + MutationObserver 动态监听）是否已安装 */
+/* WeakMap<XMLHttpRequest, {method, url, async}>: XHR 实例的 open 参数（send 时读取；重复 open 覆盖） */
+const xhrOpenMeta = new WeakMap();
+
+/* WeakMap<Window, {open, send}>: 已安装 XHR 包装的窗口（主窗口 + 同源 iframe）→ 安装时的原型方法。
+   用途与 hookedFetchHooks 相同：防同一 realm 重复包装；iframe 重载或内部脚本替换原型后重新包装。 */
+const hookedXhrProtos = new WeakMap();
+
+/* boolean: iframe 请求包装（fetch + XHR，初始扫描 + MutationObserver 动态监听）是否已安装 */
 let iframeHooksInstalled = false;
+
+/* object: 最近一次信封解包尝试的结果（供 __rlogDebug 查询；只记原因与候选序号，不记真实地址） */
+let lastEnvelopeResult = { hit: false, reason: 'none', urlCandidateIndex: null, bodyCandidateIndex: null };
 
 /* number: 递增的请求捕获编号，用于把回复精确挂回对应记录 */
 let captureSeq = 0;
@@ -314,6 +349,47 @@ let lastNativeIntent = null;
 /* boolean: 是否已安装原生入口监听 */
 let sourceTrackingInstalled = false;
 
+/* object|null: 当前主生成轮次（pass）状态（RQ-32 正向识别的锚点）
+   { id, active, type, startTime, depth, dataTime, bodyRef, chatBodyRef, promptArray, e2Claimed, candidateCount, positionForfeited }
+   - bodyRef     非聊天补全主 API：公开数据载荷对象（就是请求体对象）
+   - chatBodyRef 聊天补全主 API：「请求体即将发出」事件的载荷（就是请求体对象）
+   - promptArray 聊天补全主 API：公开数据载荷里的提示词数组（E2 同源附加要求用）
+   轮次由「生成开始（非安静、非只组装）」打开、「生成结束 / 生成被停止」关闭；
+   群聊的嵌套通知按「最近一次公开数据归属于当前轮」处理（见 openOrResetGenerationPass）。 */
+let generationPass = null;
+
+/* number: 轮次编号（自增；E3 位置证据作废时按编号找回本轮已按位置证据判原生的记录） */
+let generationPassSeq = 0;
+
+/* number|null: 最近一次「位置证据已作废」的轮次编号（轮次对象可能已关闭，故单独留一份：
+   轮次内两条请求的「判定」与「建档」是异步两步，第二条可能在第一条建档之前就作废掉证据） */
+let lastForfeitedPositionPassId = null;
+
+/* boolean: 是否已安装主生成轮次跟踪 */
+let generationPassTrackingInstalled = false;
+
+/* object|null: 最近一次 ST 消息事件（消息到达 / 角色消息已渲染 / 翻页已切换）的楼层候选文本
+   { mesId, texts: string[], at }；供「响应落楼后的来源修正」使用。 */
+let lastFloorEvent = null;
+
+/* Map<record, {at}>: 「响应已定稿、等待落楼修正」的插件记录（需要遍历，故不用 WeakMap） */
+const pendingSourceCorrections = new Map();
+
+/* number|timeout|null: 修正短延迟重试定时器 */
+let sourceCorrectionTimer = null;
+
+/* object: 修正统计（供 __rlogDebug.getSourceCorrectionStats 查询） */
+let sourceCorrectionStats = { count: 0, lastReason: '', lastTime: '' };
+
+/* boolean: 是否已安装来源修正跟踪（ST 消息事件监听） */
+let sourceCorrectionTrackingInstalled = false;
+
+/* object|null: 最近一次来源判定结果（规则名 / 悬停说明 / 原因；供 __rlogDebug 查询） */
+let lastSourceDecision = null;
+
+/* string: 最近一次判「插件」的排除原因（供 __rlogDebug.getLastExclusion 查询） */
+let lastExclusionReason = '';
+
 /* boolean: UI 是否已构建（防止 init() 竞态导致双重建构） */
 let uiBuilt = false;
 
@@ -323,8 +399,7 @@ let contentPreviewEnabled = false;
 /* boolean|null: 强制覆盖内容预览开关（用于引导程序演示） */
 let forcePreviewState = null;
 
-/* @type {object} 偏好设置状态（6 项，默认全关；持久化到 localStorage）
-   六项偏好「浮标默认入口」「昼夜模式跟随 ST 主题」「移动端全屏」「点击面板外关闭」「筛选状态持久化」「极简模式」均已接入实际行为。 */
+/* @type {object} 偏好设置状态（6 项，默认全关；持久化到 localStorage） */
 let preferences = {
     badgeDefault: false,   /* boolean: 浮标默认入口（开启后插件启动默认显示浮标，右上角默认位置；关闭面板/最小化时浮标回到 badgePos） */
     followStTheme: false,  /* boolean: 昼夜模式跟随 ST 主题（开启后主面板亮暗自动跟随 ST 主题，手动昼/夜按钮不生效；与浮标配色互不相干） */
@@ -379,6 +454,26 @@ let readFullFormat = 'formatted';
 
 /* ── 工具函数 ─────────────────────────── */
 
+/* 安全读取 ST 上下文：未就绪或内部异常一律返回 null（来源判定的 X3 与轮次跟踪都用它）
+   @returns {object|null} */
+function getStContextSafe() {
+    try {
+        return (window.SillyTavern && typeof window.SillyTavern.getContext === 'function')
+            ? window.SillyTavern.getContext()
+            : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+/* 时间戳格式化（与 addRecord 内联格式一致：YYYY-MM-DD HH:mm:ss）
+   @param {Date|number} value @returns {string} */
+function formatTimestamp(value) {
+    const d = (value instanceof Date) ? value : new Date(value);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} `
+        + `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
 /* 从模型名提取「家族」标识（同家族共享分词器），匹配规则参照 ST tokenizers.js 的 getTokenizerModel()。
    @param {string} modelName @returns {string} 家族标识，无法识别时返回原名小写 */
 function extractModelFamily(modelName) {
@@ -430,7 +525,6 @@ async function computeTokensForMessages(messages, modelName) {
         return;
     }
 
-    /* 获取 ST 主 API 的当前模型名称，与请求模型名对比判断分词器是否匹配 */
     let stModelName = '';
     try {
         if (ctx && typeof ctx.getChatCompletionModel === 'function') {
@@ -438,10 +532,10 @@ async function computeTokensForMessages(messages, modelName) {
         }
     } catch (e) { /* ignore */ }
 
-    /* 按模型家族（而非全名）对比：同一家族的模型共享分词器，不需要显示 ~ */
+    /* 按模型家族对比：同家族共享分词器，不需要显示 ~ */
     const tokenizerCompatible = isSameModelFamily(modelName, stModelName);
 
-    /* 逐条使用 ST 原生分词器精确计算（每条独立请求，ST 内部有缓存机制） */
+    /* 逐条用 ST 原生分词器精确计算（ST 内部有缓存） */
     for (const msg of messages) {
         try {
             msg.tokens = await getTokenCountAsync(msg.content, 0);
@@ -460,15 +554,15 @@ async function computeTokensForMessages(messages, modelName) {
 function extractModelName(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return '未知模型';
 
-    /* 1. 直接在顶层找 model 字段（OpenAI、大多数兼容格式） */
+    /* 顶层 model 字段（OpenAI、大多数兼容格式） */
     if (typeof body.model === 'string' && body.model) return body.model;
 
-    /* 2. Gemini 格式：generationConfig.model */
+    /* Gemini 格式：generationConfig.model */
     if (body.generationConfig && typeof body.generationConfig.model === 'string' && body.generationConfig.model) {
         return body.generationConfig.model;
     }
 
-    /* 3. 尝试从顶层其他常见字段推断 */
+    /* 其他常见字段 */
     const modelKeys = ['model_name', 'modelName', 'name', 'engine'];
     for (const key of modelKeys) {
         if (typeof body[key] === 'string' && body[key]) return body[key];
@@ -523,10 +617,9 @@ function getRoleLabel(role) {
    @param {string} content @returns {string} */
 function getContentPreview(content) {
     if (!content || typeof content !== 'string') return '';
-    /* 将换行符替换为空格，然后去掉首尾空白 */
     const collapsed = content.replace(/\n/g, ' ').trim();
     if (!collapsed) return '';
-    /* 截断到 200 字符作为安全上限，CSS 会进一步根据宽度做视觉省略 */
+    /* 200 字符为安全上限，视觉省略交给 CSS */
     return collapsed.length > 200 ? collapsed.slice(0, 200) + '…' : collapsed;
 }
 
@@ -577,18 +670,16 @@ function relativeLuminance(r, g, b) {
 
 /* ── AI 请求体结构验证 ───────────────────── */
 
-/* ST 内部聊天消息对象特征 — 用于排除非 AI 请求的聊天数据
-   真正发送给 AI 的消息对象结构：{ role, content }
-   ST 内部存储的聊天对象结构：{ chat_metadata, mes, swipe_id, send_date, is_user, is_system, ... } */
+/* ST 内部聊天消息对象特征，用于排除非 AI 请求的聊天数据
+   仅收录 ST 自有字段；第三方插件写入聊天数据的自定义键不用于判断 */
 const ST_INTERNAL_MSG_KEYS = new Set([
     'chat_metadata', 'mes', 'swipe_id', 'send_date', 'is_user', 'is_system',
-    'extra', 'gen_id', 'gen_start', 'gen_finished', 'swipes', 'swipe_info',
-    'fork', 'fork_id', 'ch_name', 'file_name', 'integrity', 'note_prompt',
+    'extra', 'gen_id', 'gen_finished', 'swipes', 'swipe_info',
+    'ch_name', 'file_name', 'integrity', 'note_prompt',
     'note_interval', 'note_position', 'note_depth', 'note_role',
-    'timedWorldInfo', 'LWB_PENDING_VAREVENT_BLOCKS',
+    'timedWorldInfo',
 ]);
 
-/* 判断 fetch 输入对应的 URL。 */
 function getFetchRequestUrl(input) {
     if (typeof input === 'string') return input;
     if (input && typeof input.url === 'string') return input.url;
@@ -623,12 +714,20 @@ function isPotentialGenerationUrl(url) {
     return pathMatchesAny(path, AI_GENERATION_PATH_PATTERNS);
 }
 
+/* 外层快速通道（fetch 与 XHR 共用）：地址是 ST 内部接口且不含生成端点特征时，跳过外层判定，
+   只尝试信封解包。 */
+function isOuterFastPathUrl(url) {
+    const path = getUrlPathForMatch(url);
+    return !!(path && !pathMatchesAny(path, AI_GENERATION_PATH_PATTERNS)
+        && (path.startsWith('/api/') || path.startsWith('/assets/') || path.startsWith('/backgrounds/')));
+}
+
 function hasGenerationRequestHints(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
     return Object.keys(body).some(k => AI_GENERATION_BODY_KEYS.has(k));
 }
 
-/* 严格验证一个对象是否为标准 AI 消息。
+/* 严格验证一个对象是否为标准 AI 消息
    这里有意只接受 role + content，避免把 ST 内部聊天记录、角色卡或系统加载数据误判为生成请求。 */
 function isAiMessageObject(obj) {
     if (!obj || typeof obj !== 'object') return false;
@@ -662,42 +761,36 @@ function isGeminiContentObject(obj) {
 /* 判断请求体是否为 AI 生成请求：结构识别为主，URL 与生成参数辅助过滤（排除 ST 内部接口）。
    检查顺序由便宜到昂贵：类型校验 → URL 排除 → 顶层 key 扫描 → 数组逐元素校验。 */
 function isAiRequestBody(body, requestUrl) {
-    /* 便宜检查 1：基础类型 */
     if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
 
-    /* 便宜检查 2：URL 明确排除（字符串索引匹配，不用遍历数组） */
+    /* URL 明确排除（字符串索引匹配，不用遍历数组） */
     if (isExplicitNonGenerationUrl(requestUrl)) return false;
 
-    /* 便宜检查 3：顶层特征扫描 — 只需检查 body 的 key 集合 */
     const generationUrl = isPotentialGenerationUrl(requestUrl);
     const hasHints = hasGenerationRequestHints(body);
 
-    /* 如果既不是生成 URL 也没有生成参数特征，且顶层也没有 messages/chat/contents/system+prompt， */
-    /* 那就快速退出，无需遍历数组做昂贵的逐元素校验 */
+    /* 既不是生成 URL 也没有生成参数特征时，只在顶层存在消息容器字段的情况下继续：
+       放行纯文本补全，同时避免昂贵的逐元素校验 */
     if (!generationUrl && !hasHints) {
-        /* 快速检查顶层是否有可能包含消息的数组字段 */
         const hasMessagesArray = Array.isArray(body.messages) && body.messages.length > 0;
         const hasChatArray = Array.isArray(body.chat) && body.chat.length > 0;
         const hasContentsArray = Array.isArray(body.contents) && body.contents.length > 0;
         const hasSystemPrompt = typeof body.system === 'string' && body.system.length > 0;
         const hasPlainPrompt = typeof body.prompt === 'string' && body.prompt.length > 0;
 
-        /* 如果没有任何消息容器字段，直接退出 */
         if (!hasMessagesArray && !hasChatArray && !hasContentsArray && !hasSystemPrompt && !hasPlainPrompt) {
             return false;
         }
 
-        /* 如果有 prompt 但没有 generationUrl/hasHints，仍可能是纯文本补全 */
         if (hasPlainPrompt && !hasMessagesArray && !hasChatArray && !hasContentsArray && !hasSystemPrompt) {
             /* 纯文本补全场景放行（由 parseFetchRequestBody 中单独处理） */
             return true;
         }
 
-        /* 其他情况：有数组但没有生成特征，大概率是 ST 内部数据加载，跳过 */
+        /* 有数组但没有生成特征，大概率是 ST 内部数据加载 */
         return false;
     }
 
-    /* 昂贵检查：只在顶层特征匹配后才遍历数组做逐元素校验 */
     const looksLikeGeneration = generationUrl || hasHints;
 
     if (typeof body.system === 'string' && Array.isArray(body.messages) && body.messages.length > 0) {
@@ -723,7 +816,696 @@ function isAiRequestBody(body, requestUrl) {
     return false;
 }
 
-/* ── 请求来源识别 ───────────────────────── */
+/* ── 信封式代理请求解包 ─────────────────── */
+
+/* 记录一次信封解包尝试的结果（供 __rlogDebug 查询；只记原因与顶层候选序号，不记任何真实地址） */
+function rememberEnvelopeResult(hit, reason, urlIndex, bodyIndex) {
+    lastEnvelopeResult = {
+        hit: !!hit,
+        reason,
+        urlCandidateIndex: hit ? urlIndex : null,
+        bodyCandidateIndex: hit ? bodyIndex : null,
+    };
+}
+
+/* 解析请求文本为 JSON 对象（数组/标量/非法 JSON 一律返回 null，不抛错） */
+function parseJsonText(text) {
+    if (typeof text !== 'string' || !text) return null;
+    try {
+        const parsed = JSON.parse(text);
+        return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+/* 信封内层 body 候选取值（G4 + G7）：object（非数组）直接取用；字符串最多 JSON.parse 一次、
+   解析结果仍是 object 才取用；其余一律视为该候选无效（不再递归深入）。 */
+function normalizeEnvelopeBody(value) {
+    if (!value) return null;
+    if (typeof value === 'object' && !Array.isArray(value)) return value;
+    if (typeof value === 'string') {
+        return parseJsonText(value);
+    }
+    return null;
+}
+
+/* 按信封形状解包一次请求（纯函数，只读入参；不递归、不搜索内层对象、一次请求最多命中一组）：
+   输入 方法 + 原始请求文本 → { effectiveUrl, effectiveBody, viaProxyEnvelope } 或 null（不是信封）。
+   闸门顺序：G1 方法 → G3「URL 形状」文本预筛 → G4/G7 body 取值 → G9 顶层确定性枚举 →
+   G6① 内层须为完整 http(s) 绝对地址 → G5 复用现有请求体校验（不认字段名，只认值）。 */
+function resolveRequestEnvelope(method, rawText) {
+    /* G1：只处理写方法（与现有拦截一致） */
+    const upperMethod = typeof method === 'string' ? method.toUpperCase() : '';
+    if (upperMethod !== 'POST' && upperMethod !== 'PUT' && upperMethod !== 'PATCH') {
+        rememberEnvelopeResult(false, 'method-not-writable');
+        return null;
+    }
+
+    /* G3：廉价文本预筛 —— 原始文本里必须出现「URL 形状」命中，未命中不解析 JSON */
+    if (typeof rawText !== 'string' || !rawText || !ENVELOPE_URL_SHAPE_RE.test(rawText)) {
+        rememberEnvelopeResult(false, 'url-shape-miss');
+        return null;
+    }
+
+    const outer = parseJsonText(rawText);
+    if (!outer) {
+        rememberEnvelopeResult(false, 'outer-not-object');
+        return null;
+    }
+
+    /* G9：只在外层顶层自有可枚举字段中枚举（Object.keys 顺序）；URL 候选外循环、
+       body 候选内循环，命中第一组同时满足 G6①/G5 的组合即停。 */
+    const keys = Object.keys(outer);
+    let sawUrlCandidate = false;
+    for (let urlIndex = 0; urlIndex < keys.length; urlIndex++) {
+        const urlCandidate = outer[keys[urlIndex]];
+        if (typeof urlCandidate !== 'string' || !urlCandidate) continue;
+        if (!isPotentialGenerationUrl(urlCandidate)) continue;
+        sawUrlCandidate = true;
+        /* G6①：内层目标地址必须是完整的 http(s) 绝对地址（排除 ST 内部相对路径） */
+        if (!/^https?:\/\//i.test(urlCandidate)) continue;
+        for (let bodyIndex = 0; bodyIndex < keys.length; bodyIndex++) {
+            if (bodyIndex === urlIndex) continue; /* 同一字段不能同时充当两种角色 */
+            const innerBody = normalizeEnvelopeBody(outer[keys[bodyIndex]]);
+            if (!innerBody) continue;
+            /* G5：内层复用现有全部校验（最终要求存在真正的 role/content 消息数组） */
+            if (!isAiRequestBody(innerBody, urlCandidate)) continue;
+            rememberEnvelopeResult(true, 'hit', urlIndex, bodyIndex);
+            return { effectiveUrl: urlCandidate, effectiveBody: innerBody, viaProxyEnvelope: true };
+        }
+    }
+
+    rememberEnvelopeResult(false, sawUrlCandidate ? 'no-valid-pair' : 'no-url-candidate');
+    return null;
+}
+
+/* 统一请求判定（fetch 与 XHR 共用）：外层判定通过 → 按外层记录（不再解包）；外层判定不通过
+   （含被快速通道跳过）→ 尝试信封解包。两者互斥，一条请求最多产出一条记录。
+   @param {object} capture { requestUrl, method, rawText, getBody, context }
+     getBody: 惰性取外层请求体的函数（返回 object|null；信封路径不需要时就省掉这次解析）
+     context: 来源判定上下文（RQ-32），外层判定通过时补上 bodyObject / rawText 一并下传
+   @returns {{effectiveUrl, effectiveBody, viaProxyEnvelope, context?}|null} */
+function decideCapturedRequest(capture) {
+    if (!isOuterFastPathUrl(capture.requestUrl)) {
+        let outerBody = null;
+        try {
+            outerBody = capture.getBody ? capture.getBody() : null;
+        } catch (e) {
+            outerBody = null;
+        }
+        if (outerBody && isAiRequestBody(outerBody, capture.requestUrl)) {
+            return {
+                effectiveUrl: capture.requestUrl,
+                effectiveBody: outerBody,
+                viaProxyEnvelope: false,
+                /* 请求上下文：补上外层请求体对象引用（与保存的公开数据引用同一时，E2 直接成立） */
+                context: Object.assign({}, capture.context || {}, {
+                    bodyObject: outerBody,
+                    rawText: (typeof capture.rawText === 'string') ? capture.rawText : (capture.context ? capture.context.rawText : null),
+                }),
+            };
+        }
+    }
+    return resolveRequestEnvelope(capture.method, capture.rawText);
+}
+
+/* ── 请求来源识别（证据分层判定，RQ-32） ───────── */
+
+/* 【判定顺序（固定，定义见 requirements.md「RQ-32 附」）】
+   0 现有请求体校验 + 信封解包（唯一可前置终止的排除项，RQ-31）
+   → 1 E1 可中止句柄对象同一（仅 fetch 且仅流式）
+   → 2 E2 请求体来自本轮主生成的公开数据（每轮只认领第一条命中的请求）
+   → 3 通用排除 X2（生成类型字段异常）/ X3（API 身份与主配置不一致）/ X4（不在任何主生成轮次内）/ X5（同源 iframe）
+   → 4 E3 位置备用证据（公开数据事件之后、本轮结束之前，且本轮只出现这一条候选写请求）
+   → 5 旧兜底：原生入口点击 / 回车 + 5 秒窗口 + 生成开始事件的类型保底（保留不删，最低优先级）
+   → 6 其余一律「插件」（默认）
+
+   【顺序理由（务必保留）】X3 在「拦截瞬间」比对，而插件可能在生成过程中临时改动主 API 配置（临时切模型 /
+   换渠道），此时真主请求与当前配置不一致；排除项若前置终止会把真主请求标成插件。E2 是同源判定，
+   插件请求不可能满足，故正向证据先跑无风险。 */
+
+/* 来源判定用到的规则名（供调试口 __rlogDebug.getLastSourceDecision 与文档对照，不参与展示）：
+   envelope / E1 / E2 / X2 / X3 / X4 / X5 / E3 / legacy / default / E3-revoked / correct */
+
+/* 构造来源对象：值域仍是「原生 / 插件」两个值；rule / evidence / passId 是内部判定元数据
+   （Rule 名供调试与回归断言，evidence = 'position' 时记录可随 E3 唯一性失效退回「插件」）。
+   @param {'native'|'plugin'} type @param {string} detail 悬停说明 @param {string} rule @returns {object} */
+function makeSource(type, detail, rule) {
+    const normalized = type === 'native' ? 'native' : 'plugin';
+    return {
+        type: normalized,
+        label: getSourceLabel({ type: normalized }),
+        detail,
+        rule: rule || '',
+        evidence: null,
+        passId: null,
+    };
+}
+
+/* 记录最近一次来源判定结果（调试口用）并返回该结果
+   @param {object} result @param {string} reason 人类可读原因 @returns {object} */
+function noteSourceDecision(result, reason) {
+    lastSourceDecision = {
+        type: result.type,
+        rule: result.rule,
+        detail: result.detail,
+        reason: reason || '',
+        at: Date.now(),
+    };
+    if (result.type === 'plugin') {
+        lastExclusionReason = `${result.rule}: ${reason || ''}`.trim();
+    }
+    return result;
+}
+
+/* ── 主生成轮次（pass）跟踪 ───────────────── */
+
+/* 读取 ST 主 API 名（'openai' 表示聊天补全路径，其余为文本补全类路径）
+   @returns {string} */
+function getStMainApi() {
+    const stCtx = getStContextSafe();
+    return (stCtx && typeof stCtx.mainApi === 'string') ? stCtx.mainApi : '';
+}
+
+/* 结束本轮（清空轮次对象；悬挂超时也走这里） */
+function resetGenerationPassState() {
+    generationPass = null;
+}
+
+/* 打开 / 重置一个主生成轮次（收到「生成开始」事件，类型非安静、非只组装不发送）。
+   群聊的主生成通知会嵌套出现多份：按「最近一次公开数据归属于当前轮」处理——已有轮次不新建对象，
+   只清空本轮公开数据与候选计数（E2 认领与 E3 计数随之重新开始），并累计嵌套深度。
+   @param {string} type 生成类型 */
+function openOrResetGenerationPass(type) {
+    const now = Date.now();
+    if (generationPass && (now - generationPass.startTime) > PASS_MAX_AGE_MS) {
+        resetGenerationPassState(); /* 悬挂轮次（结束事件丢失）：先清掉再开新轮 */
+    }
+    if (!generationPass) {
+        generationPass = {
+            id: ++generationPassSeq,
+            active: true,
+            type: '',
+            startTime: now,
+            depth: 0,
+            dataTime: null,
+            bodyRef: null,
+            chatBodyRef: null,
+            promptArray: null,
+            e2Claimed: false,
+            candidateCount: 0,
+        };
+    }
+    generationPass.active = true;
+    generationPass.type = String(type || '') || generationPass.type;
+    generationPass.startTime = now;
+    generationPass.depth++;
+    generationPass.dataTime = null;
+    generationPass.bodyRef = null;
+    generationPass.chatBodyRef = null;
+    generationPass.promptArray = null;
+    generationPass.e2Claimed = false;
+    generationPass.candidateCount = 0;
+}
+
+/* 收到「生成结束 / 生成被停止」：减少嵌套深度，深度归零即结束本轮 */
+function closeGenerationPass() {
+    if (!generationPass) return;
+    generationPass.depth--;
+    if (generationPass.depth <= 0) resetGenerationPassState();
+}
+
+/* 当前主生成轮次（悬挂超时视为没有轮次 → 交给 X4 判「插件」）
+   @returns {object|null} */
+function getActiveGenerationPass() {
+    if (!generationPass || !generationPass.active) return null;
+    if ((Date.now() - generationPass.startTime) > PASS_MAX_AGE_MS) {
+        resetGenerationPassState();
+        return null;
+    }
+    return generationPass;
+}
+
+/* 「请求数据组装完成」事件：保存本轮公开数据载荷引用，并记下公开数据时间（E3 的起点）。
+   - 非聊天补全主 API：载荷就是请求体对象（E2 直接现场序列化比对）
+   - 聊天补全主 API：载荷是提示词数组（{ prompt: [...] }），请求体对象等「请求体即将发出」事件补上
+   @param {object} payload @param {boolean} dryRun */
+function onPassDataGathered(payload, dryRun) {
+    const pass = getActiveGenerationPass();
+    if (!pass) return;
+    if (dryRun === true) return; /* 只组装、不发送 */
+    pass.dataTime = Date.now();
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+    if (getStMainApi() === 'openai') {
+        pass.promptArray = Array.isArray(payload.prompt) ? payload.prompt : null;
+    } else {
+        pass.bodyRef = payload;
+    }
+}
+
+/* 「请求体即将发出」事件（聊天补全路径）：载荷就是即将被 JSON.stringify 的请求体对象。
+   安静生成（type === 'quiet'）不是主剧情请求，不写入本轮（否则会把插件自己的安静请求当成主请求）。 */
+function onChatCompletionSettingsReady(payload) {
+    const pass = getActiveGenerationPass();
+    if (!pass) return;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+    if (payload.type === 'quiet') return;
+    pass.chatBodyRef = payload;
+}
+
+/* 安装主生成轮次跟踪（生成开始 / 请求数据组装完成 / 请求体即将发出 / 生成结束 / 生成被停止） */
+function installGenerationPassTracking() {
+    if (generationPassTrackingInstalled) return;
+    if (!eventSource || !event_types) return;
+    generationPassTrackingInstalled = true;
+
+    const on = (key, handler) => {
+        const evt = event_types[key];
+        if (evt) eventSource.on(evt, handler);
+    };
+
+    on('GENERATION_STARTED', (type, _options, dryRun) => {
+        if (dryRun === true) return;              /* 只组装、不发送 */
+        if (String(type) === 'quiet') return;     /* 安静生成：非主剧情请求，不视为主生成轮次 */
+        openOrResetGenerationPass(String(type));
+    });
+    on('GENERATE_AFTER_DATA', (payload, dryRun) => onPassDataGathered(payload, dryRun));
+    on('CHAT_COMPLETION_SETTINGS_READY', (payload) => onChatCompletionSettingsReady(payload));
+    on('GENERATION_ENDED', () => closeGenerationPass());
+    on('GENERATION_STOPPED', () => closeGenerationPass());
+}
+
+/* ── 正向证据（E1 / E2） ─────────────────── */
+
+/* E1：请求携带的信号对象 === 当前流式处理器实例上的信号对象（仅 fetch 且仅流式）。
+   两个信号都在「拦截瞬间」由 createFetchHook 同步读取后放进请求上下文（见 buildFetchRequestContext），
+   因此不存在「判定晚于流式处理器销毁」的时序窗口。XHR 没有请求身上的可中止句柄，永远不适用。
+   @param {object|null} context @returns {boolean} */
+function matchHandleIdentity(context) {
+    if (!context || context.fromXhr) return false;
+    return !!(context.signal && context.streamingSignal && context.signal === context.streamingSignal);
+}
+
+/* 聊天补全形状的请求体（messages 为非空数组）：X2 / X3 的字段判据只适用于这一形状，
+   非聊天补全主 API 依赖 X4 / X5 / E2 覆盖。
+   @param {object} body @returns {boolean} */
+function isChatCompletionShaped(body) {
+    return !!(body && typeof body === 'object' && !Array.isArray(body)
+        && Array.isArray(body.messages) && body.messages.length > 0);
+}
+
+/* 现场序列化对象引用（循环引用 / 序列化失败返回 null）
+   @param {object} value @returns {string|null} */
+function stringifyRef(value) {
+    try {
+        return JSON.stringify(value);
+    } catch (e) {
+        return null;
+    }
+}
+
+/* 剔除非法项后的消息数组（非对象项按「非法项」剔除）
+   @param {Array} list @returns {Array} */
+function validMessageItems(list) {
+    return Array.isArray(list) ? list.filter((m) => m && typeof m === 'object') : [];
+}
+
+/* 聊天补全路径的附加要求：请求体对象的 messages 与本轮提示词数组同源（逐元素一致，允许剔除非法项）
+   @param {Array} messages @param {Array} promptArray @returns {boolean} */
+function isSameSourceMessages(messages, promptArray) {
+    const a = validMessageItems(messages);
+    const b = validMessageItems(promptArray);
+    if (a.length === 0 || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return false;
+    }
+    return true;
+}
+
+/* E2：请求体来自本轮主生成的公开数据。必须保存引用、在拦截瞬间现场序列化比对（不得提前序列化，
+   中间可能被其他监听者原地修改）；ST 是「先序列化、紧接着发送」，两步之间不插入其他代码。
+   两条路径：
+   - 非聊天补全主 API：公开数据载荷就是请求体对象 → 对象引用相同或现场序列化完全相等
+   - 聊天补全主 API：请求体对象来自「请求体即将发出」事件 → 现场序列化相等，且 messages 与本轮提示词数组同源
+   比对不上即降级，交后续层处理。
+   @param {object|null} context @returns {boolean} */
+function matchDataSameSource(context) {
+    const pass = getActiveGenerationPass();
+    if (!pass || pass.e2Claimed) return false;
+    const bodyObject = context ? context.bodyObject : null;
+    const rawText = context ? context.rawText : null;
+
+    if (pass.bodyRef) {
+        if (bodyObject && bodyObject === pass.bodyRef) return true;
+        const serialized = stringifyRef(pass.bodyRef);
+        if (serialized !== null && typeof rawText === 'string' && rawText === serialized) return true;
+    }
+    if (pass.chatBodyRef) {
+        const serialized = stringifyRef(pass.chatBodyRef);
+        if (serialized !== null && typeof rawText === 'string' && rawText === serialized
+            && isSameSourceMessages(pass.chatBodyRef.messages, pass.promptArray)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ── 通用排除项（X2 / X3） ───────────────── */
+
+/* 身份值归一化（undefined / null 与空串等同：ST 不设置某字段与设置为空是同一件事）
+   @param {*} value @returns {string} */
+function normalizeIdentityValue(value) {
+    if (value === undefined || value === null) return '';
+    return String(value).trim();
+}
+
+/* 渠道地址（自定义地址 / 反代）：两者都是「请求被送往哪里」的渠道信息，取先出现的非空值
+   @param {object} source @returns {string} */
+function getChannelAddress(source) {
+    if (!source || typeof source !== 'object') return '';
+    return normalizeIdentityValue(source.reverse_proxy) || normalizeIdentityValue(source.custom_url);
+}
+
+/* 请求地址是否为 ST 聊天补全生成端点（只比路径：主窗口拦到的是相对地址，iframe / XHR 拦到的是绝对地址）
+   @param {string} url @returns {boolean} */
+function isStChatCompletionEndpoint(url) {
+    return getUrlPathForMatch(url) === ST_CHAT_COMPLETION_ENDPOINT;
+}
+
+/* X3：API 身份与主配置一致性（仅聊天补全形状的请求体）。拦截瞬间比对四项：
+   服务商 / 请求地址 / 渠道地址（自定义地址、反代）/ 模型。任一项不一致即「插件」；
+   **四项一致不构成原生证据**（故不参与正向判定，只用于排除）。
+   @param {object} body @param {string} requestUrl @returns {boolean} */
+function isApiIdentityConsistent(body, requestUrl) {
+    const stCtx = getStContextSafe();
+    const settings = stCtx && stCtx.chatCompletionSettings;
+    if (!settings) return false; /* 拿不到主配置 → 无法证明一致 */
+
+    /* ① 服务商 */
+    if (normalizeIdentityValue(body.chat_completion_source) !== normalizeIdentityValue(settings.chat_completion_source)) {
+        return false;
+    }
+    /* ② 请求地址（ST 聊天补全生成端点） */
+    if (!isStChatCompletionEndpoint(requestUrl)) return false;
+    /* ③ 渠道地址（自定义地址 / 反代） */
+    if (getChannelAddress(body) !== getChannelAddress(settings)) return false;
+    /* ④ 模型 */
+    let expectedModel = '';
+    try {
+        expectedModel = (typeof stCtx.getChatCompletionModel === 'function')
+            ? stCtx.getChatCompletionModel(settings)
+            : settings.model;
+    } catch (e) {
+        expectedModel = settings.model;
+    }
+    if (normalizeIdentityValue(body.model) !== normalizeIdentityValue(expectedModel)) return false;
+
+    return true;
+}
+
+/* ── 位置备用证据（E3）与分层判定入口 ───────── */
+
+/* 放弃本轮的位置证据（本轮候选写请求出现第二条）：把已按「位置」证据判原生的记录退回「插件」。
+   仅退回「仍是位置证据判定的原始结果、且没有被响应落楼修正过」的记录——已由响应落楼修正
+   （record.sourceCorrected）提升为原生的记录保留原生（那是另一条独立证据）。 */
+function revokePositionEvidence(pass) {
+    if (!pass) return;
+    let revoked = 0;
+    for (const list of [records, tourPendingRecords]) {
+        for (const record of list) {
+            const src = record && record.source;
+            if (!src || src.evidence !== 'position' || src.passId !== pass.id) continue;
+            if (record.sourceCorrected) continue;
+            const prevType = src.type;
+            record.source = makeSource('plugin', SOURCE_PLUGIN_DEFAULT_DETAIL, 'E3-revoked');
+            refreshRecordSourceDom(record, prevType);
+            revoked++;
+        }
+    }
+    if (revoked > 0) {
+        lastExclusionReason = `E3-revoked: 本轮出现多条候选写请求，位置证据作废（${revoked} 条退回「插件」）`;
+    }
+}
+
+/* 作废本轮的位置证据：标记轮次 + 记下编号（供「已在途但尚未建档」的请求在 addRecord 时自查）+
+   把已建档的按位置证据判原生的记录退回「插件」 */
+function forfeitPositionEvidence(pass) {
+    if (!pass) return;
+    pass.positionForfeited = true;
+    lastForfeitedPositionPassId = pass.id;
+    revokePositionEvidence(pass);
+}
+
+/* E3 位置证据的最终确认：判定（拦截时）与建档（异步、要等 token 计算）是两步，中间本轮可能已经
+   出现第二条候选写请求——此时位置证据不成立，直接按「插件」建档，避免先「原生」再退回的可见抖动。 */
+function finalizePositionEvidenceSource(source) {
+    if (!source || source.evidence !== 'position') return source;
+    const forfeitedByLive = !!(generationPass && generationPass.id === source.passId
+        && generationPass.candidateCount >= 2);
+    if (forfeitedByLive || lastForfeitedPositionPassId === source.passId) {
+        lastExclusionReason = 'E3-revoked: 本轮出现多条候选写请求，位置证据作废';
+        return makeSource('plugin', SOURCE_PLUGIN_DEFAULT_DETAIL, 'E3-revoked');
+    }
+    return source;
+}
+
+/* E3 候选计数：本轮内、公开数据事件（本轮起点）之后的每一个候选写请求都计数，信封解包命中的同样算；
+   出现两条及以上即放弃位置证据。为避免重复计数，只由 processCapturedBody 在通过请求体校验后调用一次。 */
+function notePassWriteCandidate() {
+    const pass = getActiveGenerationPass();
+    if (!pass || pass.dataTime == null) return;
+    pass.candidateCount++;
+    if (pass.candidateCount >= 2) forfeitPositionEvidence(pass);
+}
+
+/* 旧兜底（最低优先级，保留不删）：原生入口点击 / 回车 + 5 秒窗口 + 生成开始事件的类型保底。
+   不立即消费原生入口（重新生成 / 备选回复等操作中可能有中间请求），标记在窗口过期后自动清除。
+   @returns {object|null} 命中返回来源对象，否则 null */
+function legacyNativeIntentSource() {
+    const now = Date.now();
+    if (lastNativeIntent && (now - lastNativeIntent.timestamp) <= NATIVE_INTENT_WINDOW_MS) {
+        return makeSource('native', `原生请求-${lastNativeIntent.target}`, 'legacy');
+    }
+    if (lastNativeIntent && (now - lastNativeIntent.timestamp) > NATIVE_INTENT_WINDOW_MS) {
+        lastNativeIntent = null;
+    }
+    return null;
+}
+
+/* 请求来源分层判定入口（固定顺序见本节顶部注释；顺序理由务必保留）
+   @param {object} body 已通过校验的请求体对象
+   @param {string} requestUrl 生效请求地址
+   @param {object|null} context 请求上下文 { rawText, bodyObject, method, topWindow, signal, streamingSignal, fromXhr }
+   @returns {object} 来源对象（原生 / 插件） */
+function decideRequestSource(body, requestUrl, context) {
+    const ctxInfo = context || {};
+    const pass = getActiveGenerationPass();
+
+    /* 1 E1 可中止句柄对象同一（仅 fetch 且仅流式）→ 原生 */
+    if (matchHandleIdentity(ctxInfo)) {
+        return noteSourceDecision(makeSource('native', '原生请求-流式句柄', 'E1'), '请求携带的信号对象与当前流式处理器实例一致');
+    }
+
+    /* 2 E2 请求体来自本轮主生成的公开数据（主判据；每轮只认领第一条命中的请求）→ 原生 */
+    if (matchDataSameSource(ctxInfo)) {
+        if (pass) pass.e2Claimed = true;
+        return noteSourceDecision(makeSource('native', '原生请求-数据同源', 'E2'), '请求体与本轮公开数据同源');
+    }
+
+    /* 3 通用排除项（仅信封可前置终止，已在入口完成）→ 插件 */
+    if (isChatCompletionShaped(body)) {
+        if (!Object.prototype.hasOwnProperty.call(body, 'type')) {
+            return noteSourceDecision(makeSource('plugin', SOURCE_PLUGIN_DEFAULT_DETAIL, 'X2'), '聊天补全请求体缺 type 字段（体不是 ST 构造的）');
+        }
+        if (body.type === 'quiet') {
+            return noteSourceDecision(makeSource('plugin', SOURCE_PLUGIN_DEFAULT_DETAIL, 'X2'), 'type === quiet（安静生成，非主剧情请求）');
+        }
+        if (!isApiIdentityConsistent(body, requestUrl)) {
+            return noteSourceDecision(makeSource('plugin', SOURCE_PLUGIN_DEFAULT_DETAIL, 'X3'), 'API 身份与主配置不一致（服务商 / 请求地址 / 渠道地址 / 模型）');
+        }
+    }
+    if (!pass) {
+        return noteSourceDecision(makeSource('plugin', SOURCE_PLUGIN_DEFAULT_DETAIL, 'X4'), '不在任何主生成轮次内');
+    }
+    if (!ctxInfo.topWindow) {
+        return noteSourceDecision(makeSource('plugin', SOURCE_PLUGIN_DEFAULT_DETAIL, 'X5'), '来自同源 iframe（非顶层窗口）');
+    }
+
+    /* 4 E3 位置备用证据（公开数据事件之后、本轮结束之前，且本轮只出现这一条候选写请求）→ 原生 */
+    if (pass && pass.dataTime != null && pass.candidateCount === 1) {
+        const result = makeSource('native', '原生请求-位置证据', 'E3');
+        result.evidence = 'position';
+        result.passId = pass.id;
+        return noteSourceDecision(result, '公开数据事件之后、本轮唯一候选写请求');
+    }
+
+    /* 5 旧兜底（最低优先级）→ 原生 */
+    const legacy = legacyNativeIntentSource();
+    if (legacy) return noteSourceDecision(legacy, '旧时间窗兜底（原生入口点击 / 回车）');
+
+    /* 6 其余 → 插件（默认） */
+    return noteSourceDecision(makeSource('plugin', SOURCE_PLUGIN_DEFAULT_DETAIL, 'default'), '默认插件');
+}
+
+/* ── 响应落楼后的来源修正（只做「插件 → 原生」提升） ── */
+
+/* 楼层文本归一化：统一换行、折叠行内空白、去掉行首尾空白与空行。
+   （ST 落楼时会做停止串裁剪、提示词偏置拼接等加工，这里只做空白层面的归一化。） */
+function normalizeFloorText(text) {
+    if (typeof text !== 'string' || !text) return '';
+    return text.replace(/\r\n?/g, '\n')
+        .split('\n')
+        .map((line) => line.replace(/[\t\u00a0 ]+/g, ' ').trim())
+        .filter((line) => line.length > 0)
+        .join('\n');
+}
+
+/* 回复的「纯正文」（不含思考）：记录里的回复是 `<think>…</think>` + 空行 + 正文的拼接形式 */
+function getReplyPlainContent(record) {
+    const content = (record && record.reply && record.reply.content) || '';
+    return content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
+/* 楼层正文是否与记录纯正文匹配（两侧都已归一化）：完全相等，或长度足够时「楼层包含正文」
+   （续写生成会把新内容拼到楼层末尾、提示词偏置会加在楼层开头；短文本只认完全相等，避免误判） */
+function isFloorTextMatch(floorText, replyText) {
+    if (!floorText || !replyText) return false;
+    if (floorText === replyText) return true;
+    if (replyText.length < SOURCE_CORRECTION_MIN_OVERLAP) return false;
+    return floorText.indexOf(replyText) !== -1;
+}
+
+/* 记住最近一次 ST 消息事件（消息到达 / 角色消息已渲染 / 翻页已切换）的楼层候选文本：
+   当前楼层正文 + 该楼层的翻页候选（swipes）。 */
+function rememberFloorEvent(mesId) {
+    const stCtx = getStContextSafe();
+    const chat = stCtx && stCtx.chat;
+    const idx = Number(mesId);
+    const message = (Array.isArray(chat) && Number.isFinite(idx)) ? chat[idx] : null;
+    if (!message || typeof message !== 'object') return;
+
+    const texts = [];
+    if (typeof message.mes === 'string' && message.mes.trim()) texts.push(message.mes);
+    if (Array.isArray(message.swipes)) {
+        for (const swipe of message.swipes) {
+            if (typeof swipe === 'string' && swipe.trim()) texts.push(swipe);
+        }
+    }
+    const normalized = texts.map(normalizeFloorText).filter((t) => t);
+    if (normalized.length === 0) return;
+
+    lastFloorEvent = { mesId: idx, texts: normalized, at: Date.now() };
+    scheduleSourceCorrectionCheck();
+}
+
+/* 登记一条「待修正」记录（响应正文定稿时调用）：只登记当前标「插件」的非演示记录。
+   演示记录跳过；查找修正目标时同时覆盖正常列表与引导暂存队列（见 prunePendingSourceCorrections）。 */
+function queueSourceCorrection(record) {
+    if (!record || record.isDemo) return;
+    if (!record.source || record.source.type !== 'plugin') return;
+    if (record.source.rule === 'envelope') return; /* 信封解包记录来源固定为「插件」，不参与修正 */
+    pendingSourceCorrections.set(record, { at: Date.now() });
+    scheduleSourceCorrectionCheck();
+}
+
+/* 清理待修正表：记录已不在列表（被裁剪 / 清空 / 删除）或超出保留时长。
+   宽限期内的条目只按存活时长判断——「回复先到、记录后入列表」时记录还没进列表，
+   按成员关系判定会把刚登记的条目误删。 */
+function prunePendingSourceCorrections(now) {
+    for (const [record, meta] of pendingSourceCorrections) {
+        const age = now - meta.at;
+        if (age <= SOURCE_CORRECTION_PENDING_GRACE_MS) continue;
+        const alive = records.indexOf(record) !== -1 || tourPendingRecords.indexOf(record) !== -1;
+        if (!alive || age > SOURCE_CORRECTION_PENDING_TTL_MS) {
+            pendingSourceCorrections.delete(record);
+        }
+    }
+}
+
+/* 触发一次修正尝试：立即一次 + 一次短延迟重试（消息事件先到、响应还没读完时补一次；
+   响应后到的那一侧由 queueSourceCorrection → 本函数负责触发，谁后到由谁触发）。 */
+function scheduleSourceCorrectionCheck() {
+    if (pendingSourceCorrections.size === 0) return;
+    tryPromoteSourcesFromFloor();
+    if (sourceCorrectionTimer === null) {
+        sourceCorrectionTimer = setTimeout(() => {
+            sourceCorrectionTimer = null;
+            tryPromoteSourcesFromFloor();
+        }, SOURCE_CORRECTION_RETRY_MS);
+    }
+}
+
+/* 修正：当前标「插件」的记录，其响应纯正文（不含思考）归一化后与刚出现的楼层正文 / 翻页候选
+   匹配、且匹配唯一 → 提升为「原生」。只做提升、绝不做降级；匹配到 0 条或多条一律不修
+   （以「响应没有落楼」当证据不安全：失败、中止、安静生成、扮演都不落楼）。 */
+function tryPromoteSourcesFromFloor() {
+    const floorEvent = lastFloorEvent;
+    if (!floorEvent || !floorEvent.texts.length) return;
+    const now = Date.now();
+    if ((now - floorEvent.at) > SOURCE_CORRECTION_WINDOW_MS) return; /* 楼层事件太旧：不做修正 */
+
+    prunePendingSourceCorrections(now);
+    if (pendingSourceCorrections.size === 0) return;
+
+    let matchedRecord = null;
+    let matchedCount = 0;
+    for (const [record] of pendingSourceCorrections) {
+        if (!record.reply || !record.source || record.source.type !== 'plugin') continue;
+        const replyText = normalizeFloorText(getReplyPlainContent(record));
+        if (!floorEvent.texts.some((text) => isFloorTextMatch(text, replyText))) continue;
+        matchedCount++;
+        matchedRecord = record;
+        if (matchedCount > 1) break;
+    }
+    if (matchedCount !== 1) return;
+    promoteRecordSource(matchedRecord);
+}
+
+/* 把记录来源提升为「原生」（只改来源三个字段：类型 / 显示名 / 悬停说明；记录其它内容不动） */
+function promoteRecordSource(record) {
+    const prevType = record.source && record.source.type;
+    record.source = makeSource('native', '原生请求-响应落楼修正', 'correct');
+    record.sourceCorrected = true;
+    pendingSourceCorrections.delete(record);
+    sourceCorrectionStats.count++;
+    sourceCorrectionStats.lastReason = '响应纯正文与楼层正文 / 翻页候选唯一匹配';
+    sourceCorrectionStats.lastTime = formatTimestamp(Date.now());
+    refreshRecordSourceDom(record, prevType);
+}
+
+/* 安装来源修正跟踪：ST 消息事件（消息到达 / 角色消息已渲染 / 翻页已切换）→ 记住楼层候选并尝试修正 */
+function installSourceCorrectionTracking() {
+    if (sourceCorrectionTrackingInstalled) return;
+    if (!eventSource || !event_types) return;
+    sourceCorrectionTrackingInstalled = true;
+
+    const onFloorEvent = (mesId) => rememberFloorEvent(mesId);
+    for (const key of ['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED', 'MESSAGE_SWIPED']) {
+        const evt = event_types[key];
+        if (evt) eventSource.on(evt, onFloorEvent);
+    }
+}
+
+/* fetch 请求的来源判定上下文（拦截瞬间同步读取；XHR 侧由 beginXhrCapture 单独构造） */
+function buildFetchRequestContext(realmWindow, input, init, method) {
+    let signal = (init && init.signal) ? init.signal : null;
+    if (!signal && isRequestLike(input)) {
+        try { signal = input.signal || null; } catch (e) { signal = null; }
+    }
+    const stCtx = getStContextSafe();
+    const processor = stCtx ? stCtx.streamingProcessor : null;
+    const streamingSignal = (processor && processor.abortController) ? processor.abortController.signal : null;
+    return {
+        rawText: (init && typeof init.body === 'string') ? init.body : null,
+        bodyObject: null, /* 外层判定通过时由 decideCapturedRequest 补上（对象引用相同也是 E2 证据） */
+        method,
+        topWindow: realmWindow === window,
+        fromXhr: false,
+        signal,
+        streamingSignal,
+    };
+}
 
 function rememberNativeIntent(target, source) {
     lastNativeIntent = {
@@ -745,27 +1527,16 @@ function installSourceTracking() {
         { selector: '.swipe_right, .mes_swipe_right, [data-action="swipe-right"], [title="Swipe right"]', label: '生成备选回复' },
     ];
 
-    /* ── 调试：收集近期点击事件日志 (上限 30 条) ── */
-    const recentClicks = [];
-    const MAX_CLICK_LOG = 30;
-    function logClick(action, detail) {
-        recentClicks.push({ ts: Date.now(), action, detail });
-        if (recentClicks.length > MAX_CLICK_LOG) recentClicks.shift();
-    }
-
     const onNativeClickIntent = (e) => {
         const targetEl = e.target instanceof Element ? e.target : null;
         if (!targetEl) return;
 
-        /* ── 快速区域筛选：只在聊天相关区域内检查，避免菜单/设置等区域的无意义遍历 ── */
-        /* #sheld 是 ST 主内容区容器，包含聊天界面和底部操作栏 */
+        /* 只在聊天相关区域内检查（#sheld 是 ST 主内容区容器），避免菜单/设置等区域的无意义遍历 */
         const chatZone = document.getElementById('sheld') || document.getElementById('chat') || document.getElementById('send_form');
         if (chatZone && !chatZone.contains(targetEl)) {
             return;
         }
 
-        /* 调试：记录每次捕获阶段的事件，包含目标 tag/id/class 和匹配情况 */
-        const tagId = targetEl.tagName + (targetEl.id ? '#' + targetEl.id : '') + (targetEl.className && typeof targetEl.className === 'string' ? '.' + targetEl.className.split(' ').slice(0, 3).join('.') : '');
         let matched = null;
 
         for (const item of nativeTargets) {
@@ -776,15 +1547,7 @@ function installSourceTracking() {
         }
 
         if (matched) {
-            logClick('NATIVE_MATCH', `${matched.label} via ${e.type} on ${tagId}`);
             rememberNativeIntent(matched.label, e.type === 'pointerdown' ? 'pointerdown' : 'click');
-        } else {
-            /* 调试：记录未匹配但可能相关的点击（如包含 mes_、swipe、regenerate 等关键词的元素） */
-            const cls = (typeof targetEl.className === 'string' ? targetEl.className : '') + ' ' + (targetEl.getAttribute('title') || '') + ' ' + (targetEl.getAttribute('data-action') || '');
-            const hints = ['mes_swipe', 'regenerate', 'swipe', 'mes_continue', 'impersonate', 'send_but'];
-            if (hints.some(h => cls.toLowerCase().indexOf(h) !== -1 || tagId.toLowerCase().indexOf(h) !== -1)) {
-                logClick('NATIVE_MISS', `未匹配但含关键词: ${tagId} cls="${cls.slice(0, 100)}"`);
-            }
         }
     };
 
@@ -797,10 +1560,7 @@ function installSourceTracking() {
         if (stCtx && stCtx.eventSource && stCtx.event_types) {
             const onGenStarted = (type) => {
                 const typeStr = String(type != null ? type : '');
-                logClick('GEN_STARTED', `type=${typeStr}`);
-                /* 仅当 DOM 点击事件未能捕获时，由 GEN_STARTED 补充标记 */
-                /* 备选回复 / 重新生成等明确的原生生成类型。 */
-                /* normal/quiet 通常由插件或非用户触发的生成产生，不放行。 */
+                /* 仅当 DOM 点击事件未能捕获时补充标记，且只认明确的原生生成类型 */
                 if (!lastNativeIntent || (Date.now() - lastNativeIntent.timestamp) > NATIVE_INTENT_WINDOW_MS) {
                     if (typeStr === 'impersonate') {
                         rememberNativeIntent('扮演 (ST事件)', 'generationStarted');
@@ -811,17 +1571,14 @@ function installSourceTracking() {
                     } else if (typeStr === 'swipe') {
                         rememberNativeIntent('生成备选回复 (ST事件)', 'generationStarted');
                     }
-                    /* send / quiet / normal / 其他 — 不标记，避免误伤插件 */
                 }
             };
             try {
                 stCtx.eventSource.on(stCtx.event_types.GENERATION_STARTED, onGenStarted);
-                logClick('SETUP', '已注册 GENERATION_STARTED 监听 (保底方案)');
             } catch (err) {
-                logClick('SETUP_ERR', '注册 GENERATION_STARTED 失败: ' + String(err));
+                /* 注册失败只影响保底识别，DOM 入口监听照常工作 */
+                console.debug(`[${PLUGIN_KEY}] 注册 GENERATION_STARTED 监听失败:`, err);
             }
-        } else {
-            logClick('SETUP', 'ST context 未就绪，无法注册 GENERATION_STARTED');
         }
     }
 
@@ -834,13 +1591,11 @@ function installSourceTracking() {
         if (!(targetEl instanceof HTMLTextAreaElement)) return;
         if (targetEl.id !== 'send_textarea') return;
 
-        logClick('NATIVE_ENTER', '输入框 Enter');
         rememberNativeIntent('输入框 Enter', 'keydown');
     }, true);
 
     /* 暴露调试接口到 window */
     window.__rlogDebug = {
-        getRecentClicks: () => recentClicks.slice(),
         getLastNativeIntent: () => lastNativeIntent,
         getRecords: () => records,
         getIframeHookCount: () => {
@@ -852,37 +1607,50 @@ function installSourceTracking() {
             });
             return count;
         },
-        dumpClicks: () => {
-            console.table(recentClicks.map(c => ({ time: new Date(c.ts).toISOString().slice(11, 23), ...c })));
-            return recentClicks;
+        /* XHR 包装计数（统计已挂钩的同源 iframe realm） */
+        getXhrHookCount: () => {
+            let count = 0;
+            document.querySelectorAll('iframe').forEach((f) => {
+                try {
+                    if (f.contentWindow && hookedXhrProtos.has(f.contentWindow)) count++;
+                } catch (e) { /* 跨域 iframe 跳过 */ }
+            });
+            return count;
         },
+        /* 最近一次信封解包尝试的结果（命中与否 + 原因；命中时含 G9 选中的顶层候选序号，不含真实地址） */
+        getLastEnvelopeResult: () => lastEnvelopeResult,
+        /* 回复待办区当前条目数（回归断言用：非记录类请求不应占用名额） */
+        getPendingReplyCount: () => pendingReplies.size,
+        /* 当前主生成轮次状态与类型（只读摘要；不含请求体引用） */
+        getGenerationPass: () => {
+            const pass = generationPass;
+            if (!pass) return { active: false };
+            return {
+                active: !!pass.active,
+                id: pass.id,
+                type: pass.type,
+                startTime: pass.startTime,
+                ageMs: Date.now() - pass.startTime,
+                depth: pass.depth,
+                hasData: pass.dataTime != null,
+                hasBodyRef: !!pass.bodyRef,
+                hasChatBodyRef: !!pass.chatBodyRef,
+                promptCount: Array.isArray(pass.promptArray) ? pass.promptArray.length : 0,
+                e2Claimed: !!pass.e2Claimed,
+                candidateCount: pass.candidateCount,
+            };
+        },
+        /* 最近一次来源判定（主证据命中类型：E1 句柄同一 / E2 数据同源 / E3 位置；排除：X2–X5 / 默认） */
+        getLastSourceDecision: () => (lastSourceDecision ? { ...lastSourceDecision } : null),
+        /* 最近一次判「插件」的排除原因 */
+        getLastExclusion: () => lastExclusionReason,
+        /* 修正次数与最近一次原因（只做「插件 → 原生」提升） */
+        getSourceCorrectionStats: () => ({ ...sourceCorrectionStats }),
+        /* 当前待修正记录数（响应已定稿、等待落楼匹配） */
+        getPendingCorrectionCount: () => pendingSourceCorrections.size,
     };
 
-    console.debug(`[${PLUGIN_KEY}] 请求来源识别已启用（ST 原生入口监听 + GENERATION_STARTED 保底）。调试接口: window.__rlogDebug`);
-}
-
-function inferRequestSource() {
-    const now = Date.now();
-    if (lastNativeIntent && (now - lastNativeIntent.timestamp) <= NATIVE_INTENT_WINDOW_MS) {
-        /* 不立即消费原生入口，以确保重新生成/备选回复等操作中可能出现的中间请求不会错误消费标记。 */
-        /* 标记在窗口过期后由下方逻辑自动清除。 */
-        return {
-            type: 'native',
-            label: getSourceLabel({ type: 'native' }),
-            detail: `原生请求-${lastNativeIntent.target}`,
-        };
-    }
-
-    /* 窗口过期后清除原生入口标记 */
-    if (lastNativeIntent && (now - lastNativeIntent.timestamp) > NATIVE_INTENT_WINDOW_MS) {
-        lastNativeIntent = null;
-    }
-
-    return {
-        type: 'plugin',
-        label: getSourceLabel({ type: 'plugin' }),
-        detail: '插件/非原生请求',
-    };
+    console.debug(`[${PLUGIN_KEY}] 请求来源识别已启用（证据分层判定 + 原生入口监听保底）。调试接口: window.__rlogDebug`);
 }
 
 function getSourceLabel(source) {
@@ -895,7 +1663,7 @@ function getSourceClass(source) {
     return 'rlog-source-plugin';
 }
 
-/* ── Fetch 请求拦截 ───────────────────── */
+/* ── 请求拦截（fetch + XHR） ────────────── */
 
 function getCurrentCharacterName() {
     try {
@@ -954,7 +1722,7 @@ function parseFetchRequestBody(json) {
                 messages.push({
                     role: normalizeRole(m.role),
                     content,
-                    tokens: 0, /* token 值在 parseFetchRequestBody 外由 computeTokensForMessages 异步计算 */
+                    tokens: 0, /* 由 computeTokensForMessages 异步计算 */
                     collapsed: true,
                 });
             }
@@ -973,7 +1741,7 @@ function parseFetchRequestBody(json) {
                 messages.push({
                     role: normalizeRole(m.role),
                     content,
-                    tokens: 0, /* token 值在 parseFetchRequestBody 外由 computeTokensForMessages 异步计算 */
+                    tokens: 0,
                     collapsed: true,
                 });
             }
@@ -999,7 +1767,7 @@ function parseFetchRequestBody(json) {
                 messages.push({
                     role: normalizeRole(c.role || 'user'),
                     content,
-                    tokens: 0, /* token 值在 parseFetchRequestBody 外由 computeTokensForMessages 异步计算 */
+                    tokens: 0,
                     collapsed: true,
                 });
             }
@@ -1012,7 +1780,7 @@ function parseFetchRequestBody(json) {
             messages.push({
                 role: 'system',
                 content: json.system,
-                tokens: 0, /* token 值在 parseFetchRequestBody 外由 computeTokensForMessages 异步计算 */
+                tokens: 0,
                 collapsed: true,
             });
         }
@@ -1022,7 +1790,7 @@ function parseFetchRequestBody(json) {
                 messages.push({
                     role: normalizeRole(m.role),
                     content: m.content,
-                    tokens: 0, /* token 值在 parseFetchRequestBody 外由 computeTokensForMessages 异步计算 */
+                    tokens: 0,
                     collapsed: true,
                 });
             }
@@ -1034,7 +1802,7 @@ function parseFetchRequestBody(json) {
         messages.push({
             role: 'user',
             content: json.prompt,
-            tokens: 0, /* token 值在 parseFetchRequestBody 外由 computeTokensForMessages 异步计算 */
+            tokens: 0,
             collapsed: false,
         });
     }
@@ -1043,23 +1811,43 @@ function parseFetchRequestBody(json) {
     return messages;
 }
 
-/* 后台异步处理已捕获的请求体（解析消息、算 token、存记录），与 fetch 发送解耦、不阻塞网络
-   @param {object} body @param {string} requestUrl */
-async function processCapturedBody(body, requestUrl, captureId) {
-    /* 严格请求体验证：先排除 ST 加载/切换对话等内部接口，再识别真实生成请求 */
+/* 遮蔽原始请求体里的敏感字段（入库用）；不改动入参对象，未命中时原样返回
+   @param {object} body @returns {object} */
+function redactSensitiveBody(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+
+    let redacted = null;
+    for (const field of SENSITIVE_BODY_FIELDS) {
+        /* 空值无需遮蔽 */
+        if (!body[field]) continue;
+        if (!redacted) redacted = Object.assign({}, body);
+        redacted[field] = SENSITIVE_BODY_MASK;
+    }
+    return redacted || body;
+}
+
+/* 后台异步处理已捕获的请求体（解析消息、算 token、存记录），与请求发送解耦、不阻塞网络
+   @param {object} body @param {string} requestUrl @param {number|null} captureId
+   @param {boolean} [viaProxyEnvelope=false] 是否由信封解包得到（来源强制标「插件」）
+   @param {object|null} [requestContext=null] 来源判定上下文（RQ-32：原始文本 / 请求体对象 / 是否顶层 / 信号对象） */
+async function processCapturedBody(body, requestUrl, captureId, viaProxyEnvelope = false, requestContext = null) {
     if (!body || !isAiRequestBody(body, requestUrl)) return;
 
     const messages = parseFetchRequestBody(body);
     if (!messages) return;
 
     const characterName = getCurrentCharacterName();
-    const source = inferRequestSource();
-    const modelName = extractModelName(body); /* 从请求体中提取模型名称 */
-    /* 异步使用 ST 原生分词器精确计算每条消息的 token 数量 */
-    /* 传入 modelName 用于与 ST 主 API 模型对比，判断分词器是否兼容 */
+    /* E3 候选计数（本轮候选写请求，两条及以上即作废位置证据）：一条请求只计一次 */
+    notePassWriteCandidate();
+    /* 信封解包命中（判定序 0，唯一可前置终止的排除项）：来源固定为「插件」，不做证据分层判定 */
+    const source = viaProxyEnvelope
+        ? noteSourceDecision(ENVELOPE_PROXY_SOURCE, '信封解包命中（RQ-31，判定终局）')
+        : decideRequestSource(body, requestUrl, requestContext);
+    const modelName = extractModelName(body);
+    /* 用 ST 原生分词器精确计算 token（modelName 用于判断分词器是否兼容） */
     await computeTokensForMessages(messages, modelName);
-    /* captureId 用于把该请求的回复精确挂回这条记录 */
-    addRecord(characterName, messages, source, modelName, body, captureId); /* 传入原始 body 供「查看全文」原始格式使用 */
+    /* captureId 用于把该请求的回复精确挂回这条记录；rawBody 入库前先遮蔽敏感字段 */
+    addRecord(characterName, messages, source, modelName, redactSensitiveBody(body), captureId);
 }
 
 /* 判断 fetch 输入是否为 Request 对象。
@@ -1073,6 +1861,7 @@ function isRequestLike(input) {
    该 realm 自己的原始 fetch（跨 realm 传 Request 会抛错）。快速通道按「非写请求 → ST 内部 API →
    才解析 body」逐级过滤；锁只保护 body 的同步捕获，originalFetch 在锁释放后立即调用，
    分词与 addRecord 走异步，不阻塞网络请求发出。
+   外层判定不通过（含被快速通道跳过）时，异步阶段再尝试按信封形状解包（见 decideCapturedRequest）。
    @param {Window} realmWindow @param {Function} getOriginalFetch @returns {Function} */
 function createFetchHook(realmWindow, getOriginalFetch) {
     let realmHookInFlight = false; /* 该 realm 的重入保护（防其他包装形成闭环） */
@@ -1098,37 +1887,50 @@ function createFetchHook(realmWindow, getOriginalFetch) {
             return originalFetch.apply(realmWindow, [input, init]);
         }
 
-        /* ── 快速通道 3：URL 完全不可能是 AI 生成端点，直接跳过（避免解析 body） ── */
+        /* ── 快速通道 3：URL 是 ST 内部接口且不含生成端点特征 ──
+           既有的「直接跳过」保持不变：只有 body 是同步可读字符串、且文本命中「URL 形状」预筛
+           （信封式代理请求的通用特征）时才继续往下捕获，其余照旧直接透传、不解析 body。 */
         const requestUrl = getFetchRequestUrl(input);
-        const path = getUrlPathForMatch(requestUrl);
-        if (path && !pathMatchesAny(path, AI_GENERATION_PATH_PATTERNS)
-            && (path.startsWith('/api/') || path.startsWith('/assets/') || path.startsWith('/backgrounds/'))) {
+        const outerFastPath = isOuterFastPathUrl(requestUrl);
+        const shapeText = (init && typeof init.body === 'string') ? init.body : null;
+        if (outerFastPath && (!shapeText || !ENVELOPE_URL_SHAPE_RE.test(shapeText))) {
             return originalFetch.apply(realmWindow, [input, init]);
         }
+        /* 回复追踪的闸门地址：外层地址被快速通道跳过时，用预筛命中的内层候选地址
+           （captureResponseForRequest 只在「地址像生成端点」时才追踪回复） */
+        let replyGateUrl = requestUrl;
+        if (outerFastPath && shapeText) {
+            const shapeMatch = shapeText.match(ENVELOPE_URL_SHAPE_RE);
+            if (shapeMatch) replyGateUrl = shapeMatch[0];
+        }
 
-        /* ── 加锁仅保护 body 同步捕获，持有时长极短 ── */
-        /* 锁内只做 init.body 的同步读取（JSON.parse 或对象引用），不涉及任何 I/O 或 await。 */
-        /* 如果 init.body 不可用，则需要从 Request 中异步读取 body —— */
-        /* 此时启动异步读取后立即退出锁，originalFetch 在锁外尽快调用。 */
+        /* ── 加锁仅保护 body 的同步捕获（不涉及 I/O 或 await）；需要从 Request 异步读 body 时，
+           启动读取后立即退出锁，originalFetch 在锁外尽快调用 ── */
         realmHookInFlight = true;
         /* object|null: 从 init.body 同步捕获到的请求体（无需异步读取时使用） */
         let syncBody = null;
+        /* string|null: 从 init.body 同步捕获到的原始请求文本（信封解包用） */
+        let rawText = null;
         /* Promise<object|null>|null: 从 Request.clone() 异步读取 body 的 Promise */
         let asyncBodyPromise = null;
         try {
             if (init && init.body) {
                 if (typeof init.body === 'string') {
-                    try { syncBody = JSON.parse(init.body); } catch (e) { syncBody = null; }
+                    rawText = init.body;
+                    /* 外层被快速通道跳过时不解析：是否解析交给信封预筛命中后的异步判定 */
+                    if (!outerFastPath) {
+                        try { syncBody = JSON.parse(init.body); } catch (e) { syncBody = null; }
+                    }
                 } else if (typeof init.body === 'object' && !Array.isArray(init.body)) {
                     /* 直接引用（不 clone，因为 processCapturedBody 只做读取） */
                     syncBody = init.body;
                 }
             }
 
-            if (!syncBody && isRequestLike(input)) {
+            /* Request 对象 body 不额外读取（信封探测只针对同步可读的 init.body 字符串） */
+            if (!outerFastPath && !syncBody && isRequestLike(input)) {
                 try {
                     const clonedReq = input.clone();
-                    /* 启动异步 body 读取，Promise 在锁外 resolve */
                     asyncBodyPromise = clonedReq.text().then(text => {
                         if (text) {
                             try { return JSON.parse(text); } catch (e) { return null; }
@@ -1141,28 +1943,43 @@ function createFetchHook(realmWindow, getOriginalFetch) {
             }
         } finally {
             realmHookInFlight = false;
-            /* 锁释放 — originalFetch 可以安全调用了 */
         }
 
-        /* ── 调用原始 fetch（锁外，尽早发出网络请求） ── */
-        /* 通过闭包保存的引用调用，避免通过 window.fetch 访问导致递归 */
+        /* ── 请求上下文（来源判定用，RQ-32）──
+           在拦截瞬间同步读取；E1（句柄对象同一）的两个信号取自同一时刻，
+           故不存在「判定晚于流式处理器销毁」的时序窗口。 */
+        const requestContext = buildFetchRequestContext(realmWindow, input, init, method);
+
+        /* ── 调用原始 fetch（锁外；经闭包引用调用，避免经 window.fetch 递归） ── */
         const fetchPromise = originalFetch.apply(realmWindow, [input, init]);
 
         /* ── 后台异步处理 body（不阻塞 fetch 返回） ── */
-        if (syncBody || asyncBodyPromise) {
+        if (syncBody || rawText || asyncBodyPromise) {
             /* 本次请求捕获编号：回复挂载、待办区清理都依赖它 */
             const captureId = ++captureSeq;
             /* 在返回给调用方的同一个 fetchPromise 上挂回复追踪（精确对应，乱序/并发不串） */
-            captureResponseForRequest(fetchPromise, requestUrl, captureId);
-            if (syncBody) {
-                /* 同步捕获的 body，直接异步处理 */
-                processCapturedBody(syncBody, requestUrl, captureId).catch(() => { /* 静默处理 */ });
+            captureResponseForRequest(fetchPromise, replyGateUrl, captureId);
+            /* 统一判定（外层优先、外层不通过才尝试信封解包），命中即用生效地址与生效请求体建档；
+               getBody 惰性求值，被快速通道跳过时不重复解析外层 body */
+            const handleBody = (getBody) => {
+                const decision = decideCapturedRequest({
+                    requestUrl,
+                    method,
+                    rawText,
+                    context: requestContext,
+                    getBody,
+                });
+                if (!decision) return null;
+                return processCapturedBody(decision.effectiveBody, decision.effectiveUrl, captureId,
+                    decision.viaProxyEnvelope, decision.context);
+            };
+            if (syncBody || rawText) {
+                /* 同步捕获的 body / 原始文本：解析与判定放到请求发出之后的异步阶段 */
+                Promise.resolve().then(() => handleBody(() => syncBody || parseJsonText(rawText)))
+                    .catch(() => { /* 静默处理 */ });
             } else if (asyncBodyPromise) {
-                /* 从 Request 异步读取的 body，等 Promise resolve 后处理 */
                 asyncBodyPromise.then(body => {
-                    if (body) {
-                        return processCapturedBody(body, requestUrl, captureId);
-                    }
+                    if (body) return handleBody(() => body);
                 }).catch(() => { /* 静默处理 */ });
             }
         }
@@ -1171,29 +1988,31 @@ function createFetchHook(realmWindow, getOriginalFetch) {
     };
 }
 
-function installFetchHook() {
+/* 安装主窗口请求拦截（fetch + XHR）：两套包装都始终安装，内部由 masterEnabled 决定是否记录。
+   由于本插件 loading_order 为 999，安装时其他插件的包装链已就绪，
+   originalFetch / 原 XHR 原型方法捕获到的都是完整的下游调用链。 */
+function installRequestHooks() {
     if (currentHook) return; /* 已安装 */
 
-    /* 主窗口：由于本插件 loading_order 为 999，安装时其他插件的 fetch 包装链已就绪，
-       originalFetch 捕获的是完整的下游调用链。 */
     originalFetch = window.fetch;
     currentHook = createFetchHook(window, () => originalFetch);
     window.fetch = currentHook;
     hookedFetchHooks.set(window, currentHook);
+    hookRealmXhr(window);
 
-    console.debug(`[${PLUGIN_KEY}] fetch 拦截已启用（网络层统一拦截模式）`);
+    console.debug(`[${PLUGIN_KEY}] 请求拦截已启用（fetch + XHR，网络层统一拦截模式）`);
 }
 
-/* 给单个同源 iframe 安装 fetch 包装：跨域拿不到 contentWindow 直接跳过；已装且未被替换则跳过，
-   避免破坏该 realm 的包装链。
+/* 给单个同源 iframe 安装请求包装（fetch + XHR）：跨域拿不到 contentWindow 直接跳过；
+   已装且未被替换则跳过，避免破坏该 realm 的包装链。
    @param {HTMLIFrameElement} iframe @returns {boolean} 是否已安装 */
-function hookIframeFetch(iframe) {
+function hookIframeRequests(iframe) {
     if (!iframe) return false;
     if (!iframe.contentWindow) {
         /* contentWindow 尚未就绪：挂 load 监听，加载完成后重试 */
         if (!iframeLoadListenersAttached.has(iframe)) {
             iframeLoadListenersAttached.add(iframe);
-            iframe.addEventListener('load', () => hookIframeFetch(iframe));
+            iframe.addEventListener('load', () => hookIframeRequests(iframe));
         }
         return false;
     }
@@ -1204,28 +2023,37 @@ function hookIframeFetch(iframe) {
     } catch (e) {
         return false;
     }
-    const existingHook = hookedFetchHooks.get(win);
-    if (existingHook && win.fetch === existingHook) return true; /* 已安装且未被替换 */
-    if (typeof win.fetch !== 'function') return false;
 
-    /* 捕获该 realm 当前的原始 fetch；iframe 重载（realm 重建）或内部脚本替换 fetch
-       后，由 load 监听重新包装。 */
-    const iframeOriginalFetch = win.fetch;
-    const hook = createFetchHook(win, () => iframeOriginalFetch);
-    win.fetch = hook;
-    hookedFetchHooks.set(win, hook);
+    /* fetch 包装：已装且未被替换则跳过 */
+    let ready = true;
+    const existingHook = hookedFetchHooks.get(win);
+    if (existingHook && win.fetch === existingHook) {
+        ready = true;
+    } else if (typeof win.fetch === 'function') {
+        /* 捕获该 realm 当前的原始 fetch；iframe 重载（realm 重建）或内部脚本替换 fetch
+           后，由 load 监听重新包装。 */
+        const iframeOriginalFetch = win.fetch;
+        const hook = createFetchHook(win, () => iframeOriginalFetch);
+        win.fetch = hook;
+        hookedFetchHooks.set(win, hook);
+    } else {
+        ready = false;
+    }
+
+    /* XHR 包装：同一个 realm 只装一次，已装且未被替换则跳过 */
+    if (!hookRealmXhr(win)) ready = false;
 
     if (!iframeLoadListenersAttached.has(iframe)) {
         iframeLoadListenersAttached.add(iframe);
-        iframe.addEventListener('load', () => hookIframeFetch(iframe));
+        iframe.addEventListener('load', () => hookIframeRequests(iframe));
     }
-    return true;
+    return ready;
 }
 
-/* 安装 iframe fetch 包装：
-   初始扫描现有 iframe（如酒馆助手脚本 iframe），并用 MutationObserver 监听后续动态创建
+/* 安装同源 iframe 请求包装（fetch + XHR）：
+   初始扫描现有 iframe，并用 MutationObserver 监听后续动态创建
    （脚本启停、角色/预设切换重建、消息渲染等）。包装始终安装，内部由 masterEnabled 决定是否记录。 */
-function installIframeFetchHooks() {
+function installIframeRequestHooks() {
     if (iframeHooksInstalled) return;
     iframeHooksInstalled = true;
 
@@ -1234,19 +2062,18 @@ function installIframeFetchHooks() {
     let totalCount = 0;
     for (const iframe of document.querySelectorAll('iframe')) {
         totalCount++;
-        if (hookIframeFetch(iframe)) hookedCount++;
+        if (hookIframeRequests(iframe)) hookedCount++;
     }
 
-    /* 监听动态新增的 iframe（含子树内新增） */
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
                 if (node.nodeType !== 1) continue;
                 if (node.tagName === 'IFRAME') {
-                    hookIframeFetch(node);
+                    hookIframeRequests(node);
                 } else if (node.querySelectorAll) {
                     for (const inner of node.querySelectorAll('iframe')) {
-                        hookIframeFetch(inner);
+                        hookIframeRequests(inner);
                     }
                 }
             }
@@ -1254,7 +2081,243 @@ function installIframeFetchHooks() {
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    console.debug(`[${PLUGIN_KEY}] iframe fetch 拦截已启用（初始 ${hookedCount}/${totalCount} 个 iframe + 动态监听）`);
+    console.debug(`[${PLUGIN_KEY}] iframe 请求拦截已启用（fetch + XHR，初始 ${hookedCount}/${totalCount} 个 iframe + 动态监听）`);
+}
+
+/* ── XHR 包装与旁听 ─────────────────────── */
+
+/* 把 open 收到的地址按该 realm 自身的 location 解析为绝对地址（主窗口与 iframe 的 location 不同）。 */
+function resolveRealmUrl(realmWindow, url) {
+    const raw = (typeof url === 'string') ? url : (url != null ? String(url) : '');
+    if (!raw) return '';
+    try {
+        const base = (realmWindow && realmWindow.location) ? realmWindow.location.href : undefined;
+        return new URL(raw, base).toString();
+    } catch (e) {
+        return raw;
+    }
+}
+
+/* 开始一次 XHR 旁听（只旁听、绝不打扰）：send 阶段同步建「被动缓冲」合成流并挂事件监听，
+   此时不分配 captureId、不注册回复追踪；判定通过后由调用方接管。
+   来源判定上下文里 signal / streamingSignal 恒为 null：XHR 没有请求身上的可中止句柄，
+   E1（句柄对象同一）只适用于 fetch，绝不可套到 XHR 上。
+   @param {XMLHttpRequest} xhr @param {*} body @param {Window} realmWindow 发出该请求的 realm
+   @returns {{method, url, rawText, trackReply, responsePromise, discard, context}|null} */
+function beginXhrCapture(xhr, body, realmWindow) {
+    if (!masterEnabled) return null;
+    if (!xhr || typeof xhr !== 'object') return null;
+    const meta = xhrOpenMeta.get(xhr);
+    if (!meta || !meta.async) return null;              /* 未经过 open 或同步 XHR（第三参 false）不追踪 */
+    if (typeof body !== 'string' || !body) return null; /* 只旁听字符串 body */
+    const requestUrl = meta.url;
+    const rawText = body;
+    /* 请求上下文（来源判定用，RQ-32）：是否顶层窗口 / 方法 / 原始请求文本 */
+    const context = {
+        rawText,
+        bodyObject: null, /* 外层判定通过时由 decideCapturedRequest 补上 */
+        method: meta.method,
+        topWindow: realmWindow === window,
+        fromXhr: true,
+        signal: null,
+        streamingSignal: null,
+    };
+    /* 外层快速通道：地址是 ST 内部接口且不含生成端点特征时，只有文本命中「URL 形状」预筛才继续
+       （非信封的 /api/ 写请求在这一步就退出，成本与既有拦截的快速通道一致） */
+    if (isOuterFastPathUrl(requestUrl) && !ENVELOPE_URL_SHAPE_RE.test(rawText)) return null;
+
+    /* responseType 不是空/`text` 时只记请求、不追回复（因此不需要建流与监听） */
+    let responseType = '';
+    try { responseType = xhr.responseType || ''; } catch (e) { responseType = ''; }
+    const trackReply = (responseType === '' || responseType === 'text');
+    if (!trackReply) {
+        return {
+            method: meta.method,
+            url: requestUrl,
+            rawText,
+            trackReply: false,
+            responsePromise: null,
+            discard: () => { /* 只记请求，无需清理缓冲 */ },
+            context,
+        };
+    }
+
+    /* 被动缓冲：ReadableStream 队列承接 progress 增量，判定通过前没有任何读取方 */
+    let controller = null;
+    const stream = new ReadableStream({ start(c) { controller = c; } });
+    const encoder = new TextEncoder();
+    let fedLength = 0;     /* 已喂入的 responseText 字符数（只保留增量，不整段累积） */
+    let stopped = false;   /* 判定不通过/流已报错：停止继续喂入 */
+    let settled = false;   /* 响应已到终态（load/error/abort/timeout 之一） */
+    let resolveResponse = null;
+    let rejectResponse = null;
+    const responsePromise = new Promise((resolve, reject) => {
+        resolveResponse = resolve;
+        rejectResponse = reject;
+    });
+    /* 判定不通过（未注册回复追踪）时不产生未处理的 Promise 拒绝 */
+    responsePromise.catch(() => { /* 静默 */ });
+
+    /* 增量喂入（只取本次新增的一段） */
+    function feed(fullText) {
+        if (stopped || typeof fullText !== 'string') return;
+        const delta = fullText.slice(fedLength);
+        if (!delta) return;
+        fedLength = fullText.length;
+        try { controller.enqueue(encoder.encode(delta)); } catch (e) { stopped = true; }
+    }
+    /* 网络失败/中止/超时：映射到现有失败分支（中止用 AbortError 名，走既有「用户中止」分支） */
+    function fail(err) {
+        if (settled) return;
+        settled = true;
+        stopped = true;
+        try { controller.error(err); } catch (e) { /* ignore */ }
+        rejectResponse(err);
+    }
+
+    xhr.addEventListener('progress', () => {
+        if (settled) return;
+        try { feed(xhr.responseText); } catch (e) { stopped = true; }
+    });
+    xhr.addEventListener('load', () => {
+        if (settled) return;
+        let text = '';
+        try { text = xhr.responseText; } catch (e) { stopped = true; }
+        feed(text);
+        const status = Number(xhr.status) || 0;
+        /* status 0（跨域被拒/网络失败）等非 200–599 按网络失败处理，不构造合成 Response */
+        if (status < 200 || status > 599) {
+            fail(new Error('network error'));
+            return;
+        }
+        let response = null;
+        try {
+            const init = { status, statusText: xhr.statusText || '' };
+            const contentType = xhr.getResponseHeader && xhr.getResponseHeader('content-type');
+            if (contentType) init.headers = { 'content-type': contentType };
+            /* 204/205/304 为无正文状态：必须不带 body 构造 */
+            const noBody = (status === 204 || status === 205 || status === 304);
+            response = noBody ? new Response(null, init) : new Response(stream, init);
+        } catch (e) {
+            response = null;
+        }
+        if (!response) {
+            fail(new Error('network error'));
+            return;
+        }
+        settled = true;
+        try { controller.close(); } catch (e) { /* ignore */ }
+        resolveResponse(response);
+    });
+    xhr.addEventListener('error', () => fail(new Error('network error')));
+    xhr.addEventListener('abort', () => {
+        const err = new Error('aborted');
+        err.name = 'AbortError';
+        fail(err);
+    });
+    xhr.addEventListener('timeout', () => fail(new Error('network error')));
+
+    return {
+        method: meta.method,
+        url: requestUrl,
+        rawText,
+        trackReply: true,
+        responsePromise,
+        context,
+        /* 判定不通过：丢弃被动缓冲（不分配 captureId、不占用回复待办名额） */
+        discard: () => {
+            stopped = true;
+            try { controller.error(new Error('discarded')); } catch (e) { /* ignore */ }
+        },
+    };
+}
+
+/* 异步处理一次旁听到的 XHR：判定 → 分配捕获编号并注册回复追踪 → 走既有记录管道。
+   @param {object} capture beginXhrCapture 的返回句柄 */
+function processCapturedXhr(capture) {
+    const decision = decideCapturedRequest({
+        requestUrl: capture.url,
+        method: capture.method,
+        rawText: capture.rawText,
+        context: capture.context,
+        getBody: () => parseJsonText(capture.rawText),
+    });
+    if (!decision) {
+        capture.discard();
+        return null;
+    }
+    /* 判定通过才分配 captureId 并注册回复追踪：非记录类 XHR 完全不占用待办名额 */
+    const captureId = capture.trackReply ? ++captureSeq : null;
+    if (captureId != null) {
+        captureResponseForRequest(capture.responsePromise, decision.effectiveUrl, captureId);
+    }
+    return processCapturedBody(decision.effectiveBody, decision.effectiveUrl, captureId,
+        decision.viaProxyEnvelope, decision.context);
+}
+
+/* 给单个 realm 安装 XHR 包装（主窗口与同源 iframe 共用）：只旁听、绝不打扰原调用。
+   open 记录方法与地址（相对地址按该 realm 自身 location 解析为绝对），send 捕获字符串 body；
+   实例元数据用 WeakMap 存、重复 open 覆盖。已装且未被替换则跳过；
+   iframe 重载（realm 重建）或内部脚本替换原型后由 load 监听重新包装。
+   @param {Window} realmWindow @returns {boolean} 是否已安装 */
+function hookRealmXhr(realmWindow) {
+    if (!realmWindow) return false;
+    let proto = null;
+    try {
+        const ctor = realmWindow.XMLHttpRequest;
+        proto = ctor && ctor.prototype;
+    } catch (e) {
+        return false;
+    }
+    if (!proto || typeof proto.open !== 'function' || typeof proto.send !== 'function') return false;
+
+    const installed = hookedXhrProtos.get(realmWindow);
+    if (installed && proto.open === installed.open && proto.send === installed.send) return true; /* 已安装 */
+
+    const originalOpen = proto.open;
+    const originalSend = proto.send;
+
+    const hookedOpen = function hookedXhrOpen(method, url, async) {
+        try {
+            xhrOpenMeta.set(this, {
+                method: typeof method === 'string' ? method.toUpperCase() : 'GET',
+                url: resolveRealmUrl(realmWindow, url),
+                async: async !== false, /* 同步 XHR（open 第三参为 false）不追踪 */
+            });
+        } catch (e) { /* 忽略捕获异常，原 open 照常调用 */ }
+        return originalOpen.apply(this, arguments);
+    };
+
+    const hookedSend = function hookedXhrSend(body) {
+        let capture = null;
+        try {
+            capture = beginXhrCapture(this, body, realmWindow);
+        } catch (e) {
+            capture = null;
+        }
+        try {
+            const result = originalSend.apply(this, arguments);
+            if (capture) {
+                /* 判定与记录放到请求发出之后的异步阶段，不阻塞 send */
+                Promise.resolve().then(() => processCapturedXhr(capture))
+                    .catch(() => { try { capture.discard(); } catch (e) { /* ignore */ } });
+            }
+            return result;
+        } catch (err) {
+            /* 原 send 自身抛错：丢弃本次捕获并按原样抛出，不改变错误语义 */
+            try { if (capture) capture.discard(); } catch (e) { /* ignore */ }
+            throw err;
+        }
+    };
+
+    try {
+        proto.open = hookedOpen;
+        proto.send = hookedSend;
+    } catch (e) {
+        return false;
+    }
+    hookedXhrProtos.set(realmWindow, { open: hookedOpen, send: hookedSend });
+    return true;
 }
 
 /* ── 回复追踪与解析 ──────────────────────── */
@@ -1278,13 +2341,10 @@ function getReplyStatusLabel(status) {
 let replyStatusMaxWidth = null;
 
 /* 实测三个状态标签在当前字体下的最大宽度（px），写入 --rlog-status-w，供等待占位共用槽位宽度，
-   回复到达不引起布局跳动。探针挂 body 并显式继承面板字体（面板折叠时也能测），
-   只有测出有效宽度才缓存（避免把 0 缓存成永久失效）。
+   避免回复到达引起布局跳动。探针挂 body 并显式继承面板字体，只有测出有效宽度才缓存。
    @returns {number} */
 function getReplyStatusMaxWidth() {
     if (replyStatusMaxWidth !== null) return replyStatusMaxWidth;
-    /* 面板字体与 document.body 可能不同（实测宽度会差几像素），探针显式继承面板计算字体； */
-    /* 挂到 body 测量：面板窗口折叠/隐藏（.rlog-panel-body display:none）时也能量出真实宽度 */
     if (!panelEl || !panelEl.isConnected) return 0;
     const probe = document.createElement('span');
     probe.className = 'rlog-reply-status';
@@ -1627,11 +2687,11 @@ function captureResponseForRequest(fetchPromise, requestUrl, captureId) {
                 }
                 return;
             }
-            /* clone 必须同步调用（在原响应被 ST 等消费之前），否则 body 已使用会抛错 */
+            /* clone 必须同步调用，否则 body 已使用会抛错 */
             const clone = response.clone();
             const contentType = (response.headers.get('content-type') || '').toLowerCase();
-            /* Content-Type 只作提示；统一增量读取，靠正文识别 SSE， */
-            /* 避免「代理对流式响应标 application/json」时中止导致已收内容丢失 */
+            /* Content-Type 只作提示：统一增量读取、靠正文识别 SSE，避免「代理对流式响应标
+               application/json」时中止导致已收内容丢失 */
             readResponseBody(clone, captureId, contentType.includes('text/event-stream') ? 'sse' : null);
         } catch (e) {
             finalizeReply(captureId, 'fail', 'response clone failed');
@@ -1742,6 +2802,8 @@ function attachReplyToRecord(record, replyData, skipRender = false) {
         updateReplyTokenInDom(record);
     }).catch(() => { /* 静默 */ });
     if (!skipRender) appendReplyToRecordDom(record);
+    /* 响应正文已定稿：登记为「待修正」（等 ST 消息事件落楼后做一次「插件 → 原生」的有限提升） */
+    queueSourceCorrection(record);
 }
 
 /* 回复到达：只把 Response 子消息追加到该记录末尾并更新标题栏状态，不重建列表（阅读位置、
@@ -1804,8 +2866,7 @@ function updateReplyTokenInDom(record) {
 
 /* ── 数据管理 ─────────────────────────── */
 
-/* 生成消息列表的去重指纹
-   通过拼接每条消息的 role + content 生成一个简单哈希，用于判断两条记录是否内容相同 */
+/* 生成消息列表的去重指纹：拼接每条消息的 role + content，用于判断两条记录是否内容相同 */
 function computeMessagesFingerprint(messages) {
     if (!messages || messages.length === 0) return '';
     /* 只用前 50 条 + 每条前 500 字符做指纹，避免超大消息拖慢性能 */
@@ -1816,14 +2877,13 @@ function computeMessagesFingerprint(messages) {
     }).join('|');
 }
 
-/* 返回当前普通记录（未置顶）列表。置顶记录单独存在 pinned 标记里，不参与普通容量。 */
+/* 当前普通记录（未置顶）列表 */
 function getNormalRecords() {
     return records.filter(r => !r.pinned);
 }
 
 /* 裁剪超出普通记录上限的最旧普通记录（从数组末尾向前找并删除，保持 records 原顺序）。
-   置顶记录跳过，不被清理；被删除记录若有在途回复则取消追踪。
-   置顶记录不计入上限，因此 records.length 可能大于 MAX_RECORDS。 */
+   置顶记录跳过、不计入上限（因此 records.length 可能大于 MAX_RECORDS）；被删除记录若有在途回复则取消追踪。 */
 function pruneNormalRecords() {
     let overCount = getNormalRecords().length - MAX_RECORDS;
     if (overCount <= 0) return;
@@ -1857,7 +2917,10 @@ function addRecord(characterName, messages, source, modelName, rawBody, captureI
     const record = {
         characterName,
         timestamp: ts,
-        source: source || { type: 'plugin', label: '插件', detail: '插件/非原生请求' },
+        /* 来源判定在拦截时完成、建档要等 token 计算，两步之间本轮状态可能已变，
+           故建档前对「位置证据」做一次最终确认（见 finalizePositionEvidenceSource） */
+        source: finalizePositionEvidenceSource(source)
+            || { type: 'plugin', label: '插件', detail: SOURCE_PLUGIN_DEFAULT_DETAIL },
         modelName: modelName || '未知模型',
         messages,
         rawBody: rawBody || null,   /* 原始请求体 JSON 对象（「查看全文」原始格式用） */
@@ -1867,16 +2930,16 @@ function addRecord(characterName, messages, source, modelName, rawBody, captureI
         reply: null,                 /* 回复内容（独立存储，不计入请求消息/查看全文） */
     };
 
-    /* 回复可能先于记录建成而到达（finalize 时记录尚未创建）：此时立即挂载， */
-    /* 由 addRecord 后续统一的渲染路径展示（skipRender=true，避免重复渲染） */
-    /* 仅当回复已终态时才挂载；仍在途的条目保留在待办区，由 finalizeReply 稍后挂载 */
+    /* 回复可能先于记录建成而到达（finalize 时记录尚未创建）：仅当回复已终态时才立即挂载，
+       并交给 addRecord 后续的渲染路径展示（skipRender=true 避免重复渲染）；
+       仍在途的条目保留在待办区，由 finalizeReply 稍后挂载 */
     if (captureId != null) {
         const replyData = consumePendingReply(captureId);
         if (replyData) attachReplyToRecord(record, replyData, true);
     }
 
-    /* 引导期间：新记录只暂存、不加入列表渲染（避免打断引导步骤的 DOM 定位）， */
-    /* 引导结束后由 endTour 合并恢复，保证不丢失。同样受最大记录数上限约束。 */
+    /* 引导期间：新记录只暂存、不加入列表渲染（避免打断引导步骤的 DOM 定位），
+       引导结束后由 endTour 合并恢复；同样受最大记录数上限约束 */
     if (tourActive) {
         tourPendingRecords.unshift(record);
         if (tourPendingRecords.length > MAX_RECORDS) {
@@ -1891,7 +2954,7 @@ function addRecord(characterName, messages, source, modelName, rawBody, captureI
     const filterActive = isFilterActive();
     const newRecordVisible = filterActive ? matchesFilter(record) : true;
 
-    /* 新记录到达时，折叠所有已有记录（仅折叠记录本身，保持各记录内部消息的折叠/展开状态不变）。
+    /* 新记录到达时折叠所有已有记录（只折叠记录本身，不动各记录内部消息的折叠状态）；
        新记录被筛选隐藏时不折叠，避免打断正在阅读的位置 */
     if (!filterActive || newRecordVisible) {
         records.forEach(r => { r.collapsed = true; });
@@ -1922,9 +2985,8 @@ function addRecord(characterName, messages, source, modelName, rawBody, captureI
             }
         }
     }
-    /* 面板未处于「完全展开可见」状态时（窗口折叠/完全关闭）， */
-    /* 恢复显示后再回顶（见 togglePanelWindow / showPanel 中的 pendingScrollToTop 处理） */
-    /* 新记录被筛选隐藏时也不置位：恢复显示后保持原位置，不打扰阅读 */
+    /* 面板未处于「完全展开可见」状态时（窗口折叠/完全关闭）留待恢复显示后回顶
+       （见 togglePanelWindow / showPanel）；新记录被筛选隐藏时也不置位，恢复后保持原位置 */
     if (!(panelEl && isPanelVisible && !isPanelCollapsed) && (!filterActive || newRecordVisible)) {
         pendingScrollToTop = true;
     }
@@ -1960,8 +3022,7 @@ function setMasterEnabled(enabled) {
         }
     }
     
-    /* hook 始终安装（在 installFetchHook 内部通过 masterEnabled 判断是否记录）， */
-    /* 不再通过开关触发 hook 的安装/卸载，避免破坏其他插件的 fetch wrapper 链。 */
+    /* hook 始终安装（内部按 masterEnabled 判断是否记录），不随开关装卸，避免破坏其他插件的 wrapper 链 */
 }
 
 function updateMasterToggleUI() {
@@ -1972,19 +3033,18 @@ function updateMasterToggleUI() {
         if (masterEnabled) {
             btn.classList.add('rlog-master-on');
             btn.classList.remove('rlog-master-off');
-            btn.style.color = '#4caf50'; /* 【标注】总开关开启时图标颜色（JS 内联覆盖 CSS 的 .rlog-master-on） */
+            btn.style.color = '#4caf50'; /* 总开关开启时图标颜色（内联覆盖 CSS 的 .rlog-master-on） */
             btn.querySelector('i').className = 'fa-solid fa-power-off';
             btn.title = '插件开启-自动记录中';
         } else {
             btn.classList.add('rlog-master-off');
             btn.classList.remove('rlog-master-on');
-            btn.style.color = '#999'; /* 【标注】总开关关闭时图标颜色（JS 内联覆盖 CSS 的 .rlog-master-off） */
+            btn.style.color = '#999'; /* 总开关关闭时图标颜色（内联覆盖 CSS 的 .rlog-master-off） */
             btn.querySelector('i').className = 'fa-solid fa-power-off';
             btn.title = '插件关闭-已停止记录';
         }
     }
 
-    /* 根据总开关状态更新面板的遮罩层级 */
     if (!masterEnabled) {
         panelEl.classList.add('rlog-disabled');
     } else {
@@ -1992,21 +3052,16 @@ function updateMasterToggleUI() {
     }
 }
 
-/* 从 localStorage 加载内容预览开关状态
-   默认关闭（首次安装或未设置时返回 false）
+/* 从 localStorage 加载内容预览开关状态（默认关闭）
    @returns {boolean} 是否开启内容预览 */
 function loadContentPreview() {
     try { return localStorage.getItem(STORAGE_PREVIEW_KEY) === '1'; } catch (e) { return false; }
 }
 
-/* 持久化内容预览开关状态到 localStorage
-   @param {boolean} enabled 是否开启 */
 function saveContentPreview(enabled) {
     try { localStorage.setItem(STORAGE_PREVIEW_KEY, enabled ? '1' : '0'); } catch (e) { /* ignore */ }
 }
 
-/* 切换内容预览开关状态
-   更新全局变量、持久化存储、UI 按钮外观，并刷新面板内容 */
 function toggleContentPreview() {
     contentPreviewEnabled = !contentPreviewEnabled;
     saveContentPreview(contentPreviewEnabled);
@@ -2018,8 +3073,7 @@ function toggleContentPreview() {
     }
 }
 
-/* 更新标题栏预览开关按钮的外观（开启/关闭状态）
-   开启时图标为眼睛（fa-eye），关闭时图标为眼睛划掉（fa-eye-slash） */
+/* 更新标题栏预览开关按钮的外观（开启 fa-eye / 关闭 fa-eye-slash） */
 function updatePreviewToggleUI() {
     const toggleEl = panelEl ? panelEl.querySelector('#rlog-preview-btn') : null;
     if (!toggleEl) return;
@@ -2037,9 +3091,9 @@ function updatePreviewToggleUI() {
     }
 }
 
-/* ── 偏好设置（持久化 + 图标态；6 项行为已实现） ─────────────── */
+/* ── 偏好设置（持久化 + 图标态） ─────────────── */
 
-/* 偏好设置键 → localStorage 存储键 映射（与「可调参数」区同风格集中管理） */
+/* 偏好设置键 → localStorage 存储键 映射 */
 const PREF_STORAGE_KEYS = {
     badgeDefault: STORAGE_PREF_BADGE_DEFAULT,
     followStTheme: STORAGE_PREF_FOLLOW_ST_THEME,
@@ -2068,9 +3122,7 @@ function hasActivePreference() {
         || preferences.clickOutside || preferences.filterPersist || preferences.minimal;
 }
 
-/* 更新「偏好设置」入口图标：
-   任意偏好激活 → fa-heart-circle-check；全部关闭 → fa-heart。
-   样式/间距与其他标题栏按钮一致，仅切换字形、不着色。 */
+/* 更新「偏好设置」入口图标：任意偏好激活 → fa-heart-circle-check，全部关闭 → fa-heart */
 function updatePrefButtonIcon() {
     if (!prefBtnEl) return;
     const iconEl = prefBtnEl.querySelector('i');
@@ -2094,17 +3146,14 @@ function syncPrefToggleUI() {
     });
 }
 
-/* 设置某个偏好：更新状态 + 持久化 + 刷新图标态与开关视觉。
-   六项偏好均已接入实际行为（见下方各 key 处理）。 */
+/* 设置某个偏好：更新状态 + 持久化 + 刷新图标态与开关视觉 */
 function setPreference(key, value) {
     if (!(key in preferences)) return;
     preferences[key] = !!value;
     savePreference(key, preferences[key]);
     updatePrefButtonIcon();
     syncPrefToggleUI();
-    /* 偏好开关的即时行为：移动端全屏立即应用/撤销；点击面板外关闭靠全局点击监听读取标志；
-       筛选持久化开启时立即落盘；极简模式立即给影子宿主加/去类；跟随 ST 主题开启时立即同步、
-       关闭时把当前主题落盘一次；浮标默认入口按面板是否隐藏决定立即显示/隐藏浮标。 */
+    /* 偏好开关的即时行为：多数开关只被对应逻辑读取标志，个别需要立即生效的按 key 处理 */
     if (key === 'mobileFull') updateMobileFullscreenClass();
     if (key === 'filterPersist' && preferences.filterPersist) saveFilterState();
     if (key === 'minimal') updateMinimalClass();
@@ -2113,8 +3162,7 @@ function setPreference(key, value) {
 }
 
 /* 「昼夜模式跟随 ST 主题」切换后的即时行为：开启→挂 ST 主题监听并立即同步（面板已打开时按
-   现有昼/夜动画切换）；关闭→用 saveTheme() 把当前主题落盘一次（记住它），此后 ST 变化不再
-   影响面板。不额外保存「上一次手动主题」这类状态。 */
+   现有昼/夜动画切换）；关闭→把当前主题落盘一次（记住它），此后 ST 变化不再影响面板。 */
 function setPreferenceFollowStThemeBehavior() {
     if (preferences.followStTheme) {
         initPanelThemeFollow(true);
@@ -2173,9 +3221,8 @@ function openPrefPanel() {
     requestAnimationFrame(() => updatePrefScrollArrows());
 }
 
-/* 关闭偏好设置浮层（唯一关闭方式是右上角 ×，由 buildUI 内的事件绑定触发）。
-   注意：遮罩点击不触发关闭、也不做任何其他动作；「点击面板外关闭」偏好针对的是
-   关闭整个插件主面板（点整个插件面板外部），与浮层的关闭方式无关，该偏好行为已实现。 */
+/* 关闭偏好设置浮层（唯一关闭方式是右上角 ×）。
+   遮罩点击不触发关闭；「点击面板外关闭」偏好针对的是整个插件主面板，与浮层无关。 */
 function closePrefPanel() {
     if (!prefOverlayEl) return;
     prefOverlayEl.classList.remove('rlog-pref-open');
@@ -2210,8 +3257,8 @@ function applyTheme() {
     } else {
         panelEl.classList.remove('rlog-light');
     }
-    /* 主题类同步到影子宿主：影子内的弹窗靠宿主上的 .rlog-light 切亮暗（跨影子边界继承）。
-       浮标是独立宿主、配色反向跟随 ST 主题，由 syncBadgeTheme() 单独处理，与本主题类无关。 */
+    /* 主题类同步到影子宿主：影子内的弹窗靠宿主上的 .rlog-light 切亮暗（跨影子边界继承）；
+       浮标是独立宿主、配色反向跟随 ST 主题，由 syncBadgeTheme() 单独处理。 */
     if (shadowHostEl) {
         if (isLightTheme) shadowHostEl.classList.add('rlog-light');
         else shadowHostEl.classList.remove('rlog-light');
@@ -2227,16 +3274,14 @@ function syncPanelThemeToSt(animate) {
     /* 状态与 DOM 类都已一致就跳过（多一道类检查：宿主重建后也能自愈） */
     if (isLight === isLightTheme && (!panelEl || panelEl.classList.contains('rlog-light') === isLight)) return;
     isLightTheme = isLight;
-    /* 注意：跟随时不写主题存储——「记住当前主题」只在关闭开关那一下执行一次
-       （见 setPreference 的 followStTheme 分支），跟随时始终保留用户上次手动设定的值 */
+    /* 跟随时不写主题存储：「记住当前主题」只在关闭开关那一下执行一次 */
     applyTheme();
     updateThemeButtonIcon();
     if (animate && isPanelVisible) playThemeSwitchAnimation();
 }
 
 /* 初始化「昼夜模式跟随 ST 主题」：先静默同步一次，再挂 <html> style 属性监听（与浮标同一挂点，
-   当前 ST 切主题/改色都会把 --SmartTheme* 写在那里，ST 没有主题变化事件）。
-   挂点将来失效只表现为不再自动跟随（fail-safe）；观察者只挂一次，回调先判偏好是否仍开启。
+   ST 没有主题变化事件）；挂点将来失效只表现为不再自动跟随。观察者只挂一次。
    @param {boolean} animate 首次同步是否允许播动画（初始化传 false） */
 function initPanelThemeFollow(animate) {
     if (!preferences.followStTheme) return;
@@ -2246,8 +3291,7 @@ function initPanelThemeFollow(animate) {
     panelThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
 }
 
-/* 从 localStorage 加载用户设定的最大记录数
-   若无保存值或值非法，返回默认值 DEFAULT_MAX_RECORDS */
+/* 从 localStorage 加载用户设定的最大记录数（无保存值或值非法时返回默认值） */
 function loadMaxRecords() {
     try {
         const raw = localStorage.getItem(STORAGE_MAX_RECORDS_KEY);
@@ -2262,19 +3306,15 @@ function loadMaxRecords() {
     return DEFAULT_MAX_RECORDS;
 }
 
-/* 将用户设定的最大记录数持久化到 localStorage
-   @param {number} value 新的最大记录数 */
 function saveMaxRecords(value) {
     try {
         localStorage.setItem(STORAGE_MAX_RECORDS_KEY, String(value));
     } catch (e) { /* ignore */ }
 }
 
-/* 设置新的最大记录数上限
-   同时更新全局变量、持久化存储、裁剪超出上限的记录、刷新标题栏显示
+/* 设置新的最大记录数上限：更新全局变量、持久化、裁剪超出上限的记录、刷新标题栏显示
    @param {number} newMax 新的上限值 */
 function setMaxRecords(newMax) {
-    /* 合法性校验 */
     if (typeof newMax !== 'number' || isNaN(newMax) || newMax < MIN_MAX_RECORDS || newMax > MAX_MAX_RECORDS) {
         return false;
     }
@@ -2284,13 +3324,9 @@ function setMaxRecords(newMax) {
     /* 如果当前普通记录数超过新上限，裁剪掉最旧的普通记录；置顶记录不受影响 */
     pruneNormalRecords();
 
-    /* 刷新标题栏显示 */
     updateHeaderTitle();
-
-    /* 记录数变化，需要重建 DOM */
     panelContentDirty = true;
 
-    /* 如果面板可见，刷新内容（裁剪后的列表） */
     if (panelEl && isPanelVisible) {
         renderPanelContent();
     }
@@ -2298,20 +3334,14 @@ function setMaxRecords(newMax) {
     return true;
 }
 
-/* 计数显示文本的唯一生成处：面板标题栏「当前记录数 / 上限」的数字部分。
-   以后要改计数显示格式只改这里一处即可（渲染函数与初始模板都调用它）。 */
-
 /* ── 通用弹窗 ─────────────────────────── */
 
-/* 创建并显示设置最大记录数的对话框
-   双击标题栏文字时触发 */
+/* 创建并显示设置最大记录数的对话框（双击标题栏文字时触发） */
 function showMaxRecordsDialog() {
-    /* 如果已有弹窗，先移除 */
     if (maxRecordsDialog) {
         maxRecordsDialog.remove();
     }
 
-    /* 创建弹窗遮罩层 */
     /* 使用 inline style 设置定位尺寸，防止父页面 CSS (如 transform) 破坏 position:fixed 的参考系 */
     const overlay = document.createElement('div');
     overlay.className = 'rlog-dialog-overlay';
@@ -2329,17 +3359,14 @@ function showMaxRecordsDialog() {
         z-index: 9999 !important;
     `;
     overlay.addEventListener('click', (e) => {
-        /* 点击遮罩层外部关闭 */
         if (e.target === overlay) {
             closeMaxRecordsDialog();
         }
     });
 
-    /* 创建弹窗主体 */
     const dialog = document.createElement('div');
     dialog.className = 'rlog-dialog';
 
-    /* 根据当前主题添加对应的类名 */
     if (isLightTheme) {
         dialog.classList.add('rlog-dialog-light');
     }
@@ -2370,22 +3397,18 @@ function showMaxRecordsDialog() {
     if (panelShadowRoot) panelShadowRoot.appendChild(overlay);
     maxRecordsDialog = overlay;
 
-    /* 绑定关闭按钮事件 */
     dialog.querySelector('.rlog-dialog-close').addEventListener('click', closeMaxRecordsDialog);
 
-    /* 绑定确认按钮事件 */
     dialog.querySelector('#rlog-dialog-confirm').addEventListener('click', () => {
         const input = dialog.querySelector('#rlog-max-records-input');
         const rawValue = parseInt(input.value, 10);
         if (!isNaN(rawValue)) {
-            /* clamp 到允许范围 */
             const clamped = Math.max(MIN_MAX_RECORDS, Math.min(MAX_MAX_RECORDS, rawValue));
             setMaxRecords(clamped);
         }
         closeMaxRecordsDialog();
     });
 
-    /* 输入框回车直接确认 */
     dialog.querySelector('#rlog-max-records-input').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
             e.preventDefault();
@@ -2395,7 +3418,6 @@ function showMaxRecordsDialog() {
         }
     });
 
-    /* 输入框自动聚焦 */
     setTimeout(() => {
         const input = dialog.querySelector('#rlog-max-records-input');
         if (input) {
@@ -2405,7 +3427,6 @@ function showMaxRecordsDialog() {
     }, 100);
 }
 
-/* 关闭最大记录数设置弹窗 */
 function closeMaxRecordsDialog() {
     if (maxRecordsDialog) {
         maxRecordsDialog.remove();
@@ -2429,10 +3450,8 @@ function showConfirmDialog(options) {
         onCancel = null,
     } = options || {};
 
-    /* 如果已有弹窗，先移除 */
     closeConfirmDialog();
 
-    /* 创建弹窗遮罩层 */
     /* 使用 inline style 设置定位尺寸，防止父页面 CSS (如 transform) 破坏 position:fixed 的参考系 */
     const overlay = document.createElement('div');
     overlay.className = 'rlog-dialog-overlay';
@@ -2450,18 +3469,15 @@ function showConfirmDialog(options) {
         z-index: 9999 !important;
     `;
     overlay.addEventListener('click', (e) => {
-        /* 点击遮罩层外部关闭 */
         if (e.target === overlay) {
             closeConfirmDialog();
             if (typeof onCancel === 'function') onCancel();
         }
     });
 
-    /* 创建弹窗主体 */
     const dialog = document.createElement('div');
     dialog.className = 'rlog-dialog rlog-confirm-dialog';
 
-    /* 根据当前主题添加对应的类名 */
     if (isLightTheme) {
         dialog.classList.add('rlog-dialog-light');
     }
@@ -2484,19 +3500,16 @@ function showConfirmDialog(options) {
     if (panelShadowRoot) panelShadowRoot.appendChild(overlay);
     confirmDialogEl = overlay;
 
-    /* 绑定关闭按钮事件 */
     dialog.querySelector('.rlog-dialog-close').addEventListener('click', () => {
         closeConfirmDialog();
         if (typeof onCancel === 'function') onCancel();
     });
 
-    /* 绑定取消按钮事件 */
     dialog.querySelector('#rlog-confirm-cancel').addEventListener('click', () => {
         closeConfirmDialog();
         if (typeof onCancel === 'function') onCancel();
     });
 
-    /* 绑定确认按钮事件 */
     dialog.querySelector('#rlog-confirm-ok').addEventListener('click', () => {
         closeConfirmDialog();
         if (typeof onConfirm === 'function') onConfirm();
@@ -2520,7 +3533,6 @@ function showConfirmDialog(options) {
     }, 100);
 }
 
-/* 关闭通用确认弹窗 */
 function closeConfirmDialog() {
     if (confirmDialogEl) {
         confirmDialogEl.remove();
@@ -2530,24 +3542,21 @@ function closeConfirmDialog() {
 
 /* ── 搜索 ───────────────────────────── */
 
-/* 重置当前搜索状态（搜索框关闭、关键词清空、高亮清除、命中序号重置）
-   用于折叠/删除/清空/新增记录等所有需要退出搜索模式的场景。
-   安全设计：不依赖搜索框 UI 是否已构建，DOM 中存在才操作。 */
+/* 重置当前搜索状态（搜索框关闭、关键词清空、高亮清除、命中序号重置），用于所有需要退出搜索模式的场景。
+   不依赖搜索框 UI 是否已构建，DOM 中存在才操作。 */
 function resetSearchIfActive() {
-    /* 清除 debounce 定时器 */
     if (searchDebounceTimer !== null) {
         clearTimeout(searchDebounceTimer);
         searchDebounceTimer = null;
     }
 
-    /* 清除所有高亮标记（包括当前命中和其它残留 mark） */
+    /* 清除所有高亮标记 */
     if (searchState) {
         const listEl = panelEl ? panelEl.querySelector('#rlog-list') : null;
         if (listEl) {
             listEl.querySelectorAll('mark.rlog-search-mark, mark.rlog-search-mark-current').forEach(mark => {
                 const parent = mark.parentNode;
                 if (parent) {
-                    /* 将 mark 替换为其文本内容，恢复原始文本 */
                     parent.replaceChild(document.createTextNode(mark.textContent), mark);
                     /* 合并相邻文本节点，避免产生多余节点 */
                     parent.normalize();
@@ -2555,7 +3564,6 @@ function resetSearchIfActive() {
             });
         }
 
-        /* 如果搜索框 DOM 存在，恢复其初始状态 */
         const searchEl = searchState.searchEl;
         if (searchEl && searchEl.parentNode) {
             searchEl.parentNode.removeChild(searchEl);
@@ -2566,7 +3574,6 @@ function resetSearchIfActive() {
             if (recordEl) {
                 /* 移除「搜索中」标记（CSS 依赖它恢复被隐藏的按钮显示） */
                 recordEl.classList.remove('rlog-searching');
-                /* 恢复记录折叠/展开箭头（▾） */
                 const toggleIcon = recordEl.querySelector('.rlog-toggle-icon');
                 if (toggleIcon) toggleIcon.style.visibility = '';
             }
@@ -2597,7 +3604,6 @@ function normalizeTextWithMap(text) {
                 map.push(i);
                 lastWasSpace = true;
             }
-            /* 连续空白只保留一个空格（折叠） */
         } else {
             normalized += ch;
             map.push(i);
@@ -2614,10 +3620,8 @@ function findMatchesInRecord(recordIndex, keyword) {
     const record = records[recordIndex];
     if (!record || !record.messages || !keyword) return [];
 
-    /* 归一化搜索关键词：所有空白折叠为单个空格，并去除首尾空白 */
     const normalizedKeyword = keyword.replace(/\s+/g, ' ').trim();
     if (!normalizedKeyword) return [];
-    /* 大小写不敏感搜索 */
     const lowerKeyword = normalizedKeyword.toLowerCase();
 
     const matches = [];
@@ -2640,16 +3644,14 @@ function findMatchesInRecord(recordIndex, keyword) {
    @param {string} lowerKeyword @param {Array} matches */
 function addContentMatches(content, msgIdx, normalizedKeyword, lowerKeyword, matches) {
     if (typeof content !== 'string' || !content) return;
-    /* 与 DOM 渲染保持一致：浏览器解析 innerHTML 时会把 \r\n / \r 规范化为 \n， */
-    /* 这里先做同样的换行规范化，匹配偏移才能直接用于 DOM 高亮； */
-    /* 否则从第一个 \r 起，落点会按前面 \r 的数量逐步漂移（高亮到无关文字）。 */
+    /* 与 DOM 渲染保持一致：浏览器解析 innerHTML 时会把 \r\n / \r 规范化为 \n，
+       这里先做同样的换行规范化，匹配偏移才能直接用于 DOM 高亮（否则会逐步漂移） */
     const normalizedContent = content.replace(/\r\n?/g, '\n');
-    /* 归一化消息内容（空白折叠 + 偏移映射） */
     const { normalized, map } = normalizeTextWithMap(normalizedContent);
     const lowerContent = normalized.toLowerCase();
 
     let pos = 0;
-    /* 快速通道：归一化内容中没有关键词则跳过该消息 */
+    /* 归一化内容中没有关键词则跳过该消息 */
     const firstIdx = lowerContent.indexOf(lowerKeyword);
     if (firstIdx === -1) return;
 
@@ -2719,7 +3721,6 @@ function highlightRange(contentEl, start, end, className = 'rlog-search-mark-cur
     let currentOffset = 0;
     let node = null;
 
-    /* 找到包含 start 偏移的文本节点 */
     while ((node = walker.nextNode())) {
         const nodeLen = node.textContent.length;
         if (currentOffset + nodeLen > start) break;
@@ -2727,7 +3728,6 @@ function highlightRange(contentEl, start, end, className = 'rlog-search-mark-cur
     }
     if (!node) return null;
 
-    /* 在该节点内拆分：before / mark / after */
     const nodeStart = currentOffset;
     const splitStart = start - nodeStart;
     const splitEnd = end - nodeStart;
@@ -2771,8 +3771,7 @@ function highlightAllMatches(recordEl, recordIndex) {
     const record = records[recordIndex];
     if (!record) return;
 
-    /* 按消息分组（跳过当前命中，橙色单独绘制） */
-    /* 同时保留每个匹配在 matches 中的下标，供黄色 mark 记录 data-match-idx */
+    /* 按消息分组（跳过当前命中，橙色单独绘制），并保留匹配在 matches 中的下标供 mark 记录 */
     const matchesByMsg = new Map();
     searchState.matches.forEach((match, idx) => {
         if (idx === searchState.currentIdx) return;
@@ -2799,53 +3798,43 @@ function highlightAllMatches(recordEl, recordIndex) {
         msgMatches.sort((a, b) => b.match.start - a.match.start);
         msgMatches.forEach(({ match, idx }) => {
             const markEl = highlightRange(contentEl, match.start, match.end, 'rlog-search-mark');
-            /* 记录匹配下标，供 removeYellowMarkByMatchIdx 准确定位要删除的黄色 mark */
+            /* 记录匹配下标，供 removeYellowMarkByMatchIdx 定位黄色 mark */
             if (markEl) markEl.dataset.matchIdx = String(idx);
         });
     });
 }
 
-/* 把当前命中滚到舒适位置：先滚 .rmsg-content 内部，再算 .rlog-list 的 scrollTop 让消息落在
-   吸顶标题栏下方。不用 scrollIntoView——它会递归滚动所有可滚动祖先，移动端会连带滚动 ST 主界面。
-   @param {HTMLElement} markEl @param {HTMLElement} contentEl */
-/* 返回当前应使用的滚动行为：极简模式用 'auto' 直接跳转，否则 'smooth' 平滑。
-   极简定位逻辑不变（位置计算/夹取照旧），只把滚动方式由平滑改成瞬时。 */
+/* 返回当前应使用的滚动行为：极简模式用 'auto' 直接跳转，否则 'smooth' 平滑。 */
 function getScrollBehavior() {
     return preferences.minimal ? 'auto' : 'smooth';
 }
 
+/* 把当前命中滚到舒适位置：先滚 .rmsg-content 内部，再算 .rlog-list 的 scrollTop 让消息落在
+   吸顶标题栏下方。不用 scrollIntoView——它会递归滚动所有可滚动祖先，移动端会连带滚动 ST 主界面。
+   @param {HTMLElement} markEl @param {HTMLElement} contentEl */
 function scrollToMatch(markEl, contentEl) {
     if (!markEl || !contentEl) return;
 
     const listEl = panelEl ? panelEl.querySelector('#rlog-list') : null;
     if (!listEl) return;
 
-    /* 1. 消息内部滚动：将 mark 对齐到 contentEl 可视区域中部偏上 */
     const contentRect = contentEl.getBoundingClientRect();
     const markRect = markEl.getBoundingClientRect();
     const contentScrollTop = contentEl.scrollTop;
     const relativeTop = markRect.top - contentRect.top + contentScrollTop;
-    /* 目标位置：距消息内容区顶部约 25% 高度处（视觉舒适区） */
     const targetScroll = relativeTop - contentRect.height * 0.25;
     const clampedContentScroll = Math.max(0, targetScroll);
     contentEl.scrollTo({ top: clampedContentScroll, behavior: getScrollBehavior() });
 
-    /* 2. 外层列表滚动：手动定位，避免 scrollIntoView 联动滚动 ST 主界面 */
-    /* 内层平滑滚动尚未完成，但 mark 在 list 中的逻辑位置可由滚动增量推算： */
-    /*   内层滚动 delta > 0 时内容上移，mark 视觉上移 delta */
-    /*   滚动后的 mark 视觉 top = markRect.top - delta */
-    /* 期望 mark 出现在所有 sticky 标题栏（记录标题栏 + 消息标题栏）下方 8px 处 */
+    /* 外层列表滚动手动定位：内层滚动尚未完成，但 mark 的最终视觉位置可由滚动增量推算
+       （markRect.top - delta），期望它落在所有 sticky 标题栏下方 8px 处 */
     const delta = clampedContentScroll - contentScrollTop;
     const markFinalTop = markRect.top - delta;
     const listRect = listEl.getBoundingClientRect();
 
-    /* 累加两个 sticky 标题栏的高度（吸顶时占用的垂直空间），而非固定 48px： */
-    /* - .rlog-record-header：吸在列表顶部（高约 40px） */
-    /* - .rmsg-header：吸在记录标题栏下方（高约 32px+） */
-    /* 用 offsetHeight 实测可自动兼容桌面/移动端不同高度，以及移动端标题栏换行变高。 */
-    /* 注意：不能测量 getBoundingClientRect().bottom 的视觉位置—— */
-    /* 当 mark 所在消息不在视口内时其 header 并未吸顶，bottom 会位于视口外很远， */
-    /* 导致目标 scrollTop 被 clamp 到 0（列表滚回顶部）。offsetHeight 不受吸顶状态影响。 */
+    /* 累加两个 sticky 标题栏（.rlog-record-header / .rmsg-header）的 offsetHeight 而非固定值，
+       以自动兼容桌面/移动端不同高度与移动端标题栏换行变高。注意不能用 getBoundingClientRect().bottom：
+       mark 所在消息不在视口内时 header 并未吸顶，bottom 会远在视口外，导致目标 scrollTop 被夹到 0。 */
     const recordEl = markEl.closest('.rlog-record');
     const msgItemEl = markEl.closest('.rmsg-item');
     let stickyHeight = 0;
@@ -2860,12 +3849,10 @@ function scrollToMatch(markEl, contentEl) {
 
     /* mark 在列表内容中的逻辑位置（不受滚动状态影响） */
     const markInList = listEl.scrollTop + markFinalTop - listRect.top;
-    /* 目标：mark 出现在标题栏下方、列表可视区域约 1/3 高度处（视觉舒适区） */
-    /* 可见内容高度 = 列表可视高度 - sticky 标题栏占用的高度 */
     const visibleHeight = Math.max(0, listEl.clientHeight - stickyHeight);
     const targetListScroll = markInList - stickyHeight - visibleHeight * 0.33;
 
-    /* clamp 到合法滚动范围（避免浏览器静默 clamp 导致意外跳变） */
+    /* 夹到合法滚动范围（避免浏览器静默夹取导致意外跳变） */
     const maxListScroll = Math.max(0, listEl.scrollHeight - listEl.clientHeight);
     const clampedListScroll = Math.max(0, Math.min(targetListScroll, maxListScroll));
 
@@ -2908,30 +3895,25 @@ function applyCurrentMatch(msgIdx, matchIdx, redrawYellowHighlights = true) {
     if (!recordEl) return;
 
     if (redrawYellowHighlights) {
-        /* 搜索词变化：清除所有高亮（黄色匹配 + 橙色当前）后重新绘制 */
+        /* 搜索词变化：清除全部高亮后重新绘制 */
         clearSearchHighlights();
 
-        /* 确保记录处于展开状态 */
         if (record.collapsed) {
             record.collapsed = false;
             recordEl.classList.add('expanded');
             recordEl.classList.remove('collapsed');
         }
 
-        /* 高亮本条内所有匹配（黄色，跳过当前命中） */
-        /* 同时会展开所有匹配到的折叠消息 */
+        /* 高亮本条内所有匹配（黄色，跳过当前命中；同时展开匹配到的折叠消息） */
         highlightAllMatches(recordEl, recordIndex);
     } else {
-        /* 导航跳转：将旧橙色的当前命中降级为黄色（保留 DOM 中的 mark，仅切换类名） */
-        /* 复用已绘制的黄色高亮，避免全量重绘卡顿 */
+        /* 导航跳转：把旧橙色命中降级为黄色，复用已绘制的 mark，避免全量重绘 */
         const oldIdx = searchState.currentIdx;
         clearCurrentHighlight(oldIdx);
 
-        /* 删除目标位置已有的黄色 mark（如果该位置之前被导航过，会残留黄色 mark） */
-        /* 必须先删除，否则画新橙色时 DOM 偏移计算会失效 */
+        /* 必须先删目标位置残留的黄色 mark，否则画新橙色时 DOM 偏移计算会失效 */
         removeYellowMarkByMatchIdx(matchIdx);
 
-        /* 确保记录处于展开状态（搜索模式打开时记录可能被折叠） */
         if (record.collapsed) {
             record.collapsed = false;
             recordEl.classList.add('expanded');
@@ -2939,7 +3921,7 @@ function applyCurrentMatch(msgIdx, matchIdx, redrawYellowHighlights = true) {
         }
     }
 
-    /* 确保当前消息处于展开状态（折叠时内容不可见无法定位） */
+    /* 折叠消息内容不可见、无法定位，先展开 */
     if (msg.collapsed) {
         msg.collapsed = false;
         const msgItem = recordEl.querySelector(`.rmsg-item[data-msg="${msgIdx}"]`);
@@ -2958,10 +3940,8 @@ function applyCurrentMatch(msgIdx, matchIdx, redrawYellowHighlights = true) {
     const match = searchState.matches[matchIdx];
     if (!match) return;
 
-    /* 高亮当前命中（橙色） */
     const markEl = highlightRange(contentEl, match.start, match.end, 'rlog-search-mark-current');
 
-    /* 更新计数 */
     searchState.currentIdx = matchIdx;
     updateSearchCounter();
 
@@ -3014,17 +3994,15 @@ function navigateSearch(direction) {
     applyCurrentMatch(match.msgIdx, nextIdx, false);
 }
 
-/* 关闭搜索框并重置搜索状态 */
 function closeSearch() {
     resetSearchIfActive();
 }
 
 /* 为指定记录打开搜索模式（排他原则：一次仅一条记录处于搜索状态）
-   点击记录操作区中的放大镜按钮时触发。
    @param {number} recordIndex 记录索引 */
 function openSearchForRecord(recordIndex) {
     if (!panelEl) return;
-    /* 排他：先关闭任何已有的搜索（包含其它记录或本记录） */
+    /* 排他：先关闭任何已有的搜索 */
     resetSearchIfActive();
 
     const listEl = panelEl.querySelector('#rlog-list');
@@ -3035,16 +4013,15 @@ function openSearchForRecord(recordIndex) {
     const actionsInner = recordEl.querySelector('.rlog-record-actions-inner');
     if (!actionsEl || !actionsInner) return;
 
-    /* 标记记录为「搜索中」（CSS 隐藏除放大镜外的其他操作按钮与下箭头， */
-    /* 释放空间给搜索框向右展开覆盖） */
+    /* 标记「搜索中」：CSS 隐藏除放大镜外的其他按钮与下箭头，把空间释放给向右展开的搜索框 */
     recordEl.classList.add('rlog-searching');
 
-    /* 隐藏记录折叠/展开箭头（▾）—— 用 visibility 保留其空间占位， */
-    /* 配合 CSS 固定 actions-inner 宽度，保证放大镜位置不被推移 */
+    /* 隐藏折叠/展开箭头（▾）：用 visibility 保留占位、配合 CSS 固定 actions-inner 宽度，
+       保证放大镜位置不被推移 */
     const toggleIcon = recordEl.querySelector('.rlog-toggle-icon');
     if (toggleIcon) toggleIcon.style.visibility = 'hidden';
 
-    /* 若记录处于折叠状态，自动展开（搜索高亮需要可见内容区） */
+    /* 折叠记录自动展开（搜索高亮需要可见内容区） */
     const record = records[recordIndex];
     if (record && record.collapsed) {
         record.collapsed = false;
@@ -3054,8 +4031,7 @@ function openSearchForRecord(recordIndex) {
         queueScrollbarsForEls(recordEl.querySelectorAll('.rmsg-content'));
     }
 
-    /* 构建搜索框 DOM（不含放大镜：普通放大镜按钮保持原位作为视觉锚点， */
-    /* 搜索框紧随其右侧展开，占用被隐藏按钮释放的空间） */
+    /* 构建搜索框 DOM：放大镜按钮保持原位作视觉锚点，搜索框在其右侧展开 */
     const searchBox = document.createElement('div');
     searchBox.className = 'rlog-search-box';
     searchBox.innerHTML = `
@@ -3071,7 +4047,6 @@ function openSearchForRecord(recordIndex) {
         </button>
     `;
 
-    /* 插入到放大镜按钮右侧（放大镜保持原位，搜索框向右展开） */
     const searchBtn = actionsInner.querySelector('.rlog-search-btn');
     if (searchBtn) {
         searchBtn.insertAdjacentElement('afterend', searchBox);
@@ -3079,7 +4054,6 @@ function openSearchForRecord(recordIndex) {
         actionsInner.appendChild(searchBox);
     }
 
-    /* 初始化搜索状态 */
     searchState = {
         recordIndex,
         keyword: '',
@@ -3088,7 +4062,6 @@ function openSearchForRecord(recordIndex) {
         searchEl: searchBox,
     };
 
-    /* 绑定搜索框内部事件 */
     const input = searchBox.querySelector('.rlog-search-input');
     const prevBtn = searchBox.querySelector('.rlog-search-prev');
     const nextBtn = searchBox.querySelector('.rlog-search-next');
@@ -3107,15 +4080,15 @@ function openSearchForRecord(recordIndex) {
         }, SEARCH_DEBOUNCE_MS);
     };
 
-    /* 输入法组合开始：置标志，组合期间的 input 事件全部跳过 */
+    /* 输入法组合期间跳过 input 事件 */
     input.addEventListener('compositionstart', () => { isComposing = true; });
-    /* 输入法组合结束（文字已上屏）：清除标志并补一次搜索（组合期间可能错过了 input） */
+    /* 组合结束（文字已上屏）：补一次搜索（组合期间可能错过了 input） */
     input.addEventListener('compositionend', () => {
         isComposing = false;
         scheduleSearch();
     });
 
-    /* 输入实时搜索（debounce 防抖），组合阶段跳过 */
+    /* 输入实时搜索（防抖） */
     input.addEventListener('input', (e) => {
         if (isComposing || e.isComposing || e.keyCode === 229) return;
         scheduleSearch();
@@ -3146,7 +4119,6 @@ function openSearchForRecord(recordIndex) {
         navigateSearch(1);
     });
 
-    /* 自动聚焦输入框 */
     setTimeout(() => {
         if (input && searchState && searchState.searchEl === searchBox) {
             input.focus();
@@ -3175,8 +4147,7 @@ function getRoleFilterGroup(role) {
     return 'other';
 }
 
-/* 子消息（含回复伪消息）是否通过角色筛选：
-   角色筛选按消息逐条判定，只控制单条子消息的显隐，不直接决定整条记录。 */
+/* 子消息（含回复伪消息）是否通过角色筛选：角色筛选按消息逐条判定，不直接决定整条记录 */
 function isMessageVisible(msg) {
     if (!msg) return false;
     return !!filterState.role[getRoleFilterGroup(msg.role)];
@@ -3218,14 +4189,12 @@ function createDefaultFilterState() {
     };
 }
 
-/* 把当前筛选状态持久化到 localStorage（仅当「筛选状态持久化」开关开启时调用）。
-   存整个 filterState 对象（source/role/model 三组布尔），刷新/重开页面后据此恢复。 */
+/* 把当前筛选状态持久化到 localStorage（仅当「筛选状态持久化」开关开启时调用） */
 function saveFilterState() {
     try { localStorage.setItem(STORAGE_FILTER_STATE_KEY, JSON.stringify(filterState)); } catch (e) { /* 忽略异常 */ }
 }
 
-/* 清洗从 localStorage 读回的筛选状态：
-   以默认全开为基准，逐分组逐键只采纳布尔值，未知/缺失/非法一律回退 true，防止脏数据。 */
+/* 清洗从 localStorage 读回的筛选状态：以默认全开为基准，逐分组逐键只采纳布尔值，其余回退 true */
 function sanitizeFilterState(state) {
     const def = createDefaultFilterState();
     if (!state || typeof state !== 'object') return def;
@@ -3240,9 +4209,8 @@ function sanitizeFilterState(state) {
     return out;
 }
 
-/* 加载持久化的筛选状态并覆盖当前 filterState。
-   仅当「筛选状态持久化」开关开启时读取；无值/解析失败/数据非法一律回退默认全开。
-   开关关闭时不读取，保持原有的会话级逻辑（刷新即重置为全开）。 */
+/* 加载持久化的筛选状态并覆盖当前 filterState（仅当「筛选状态持久化」开关开启时读取）；
+   无值 / 解析失败 / 数据非法一律回退默认全开。 */
 function loadPersistedFilterState() {
     if (!preferences.filterPersist) return;
     try {
@@ -3295,7 +4263,7 @@ function updateFilterIndicator() {
     const active = isFilterActive();
     const indicator = panelEl.querySelector('#rlog-filter-indicator');
     if (indicator) {
-        /* 只展示因筛选被隐藏的记录数；没有隐藏（含记录为空）时隐藏指示器，只留按钮圆点提醒 */
+        /* 只展示因筛选被隐藏的记录数；没有隐藏时隐藏指示器，只留按钮圆点 */
         const hiddenCount = records.length - getVisibleRecords().length;
         const showText = active && hiddenCount > 0;
         indicator.hidden = !showText;
@@ -3327,7 +4295,7 @@ function toggleFilterChip(group, value) {
     filterState[group][value] = !filterState[group][value];
     updateFilterChipUI();
     panelContentDirty = true;
-    /* 「筛选状态持久化」开启时，每次切换立即落盘，刷新/重开页面后据此恢复 */
+    /* 「筛选状态持久化」开启时立即落盘 */
     if (preferences.filterPersist) saveFilterState();
     if (panelEl && isPanelVisible) renderPanelContent();
 }
@@ -3350,7 +4318,42 @@ function getHeaderCountText() {
     return `${records.length}/${MAX_RECORDS}`;
 }
 
-/* 更新标题栏计数文字（调用 getHeaderCountText，格式集中在一处） */
+/* 来源标记的实时更新（来源修正 / E3 位置证据作废后调用）：
+   筛选归属不变 → 定点更新该条记录的来源标记与徽标；筛选归属改变 → 整表重绘并刷新指示器与计数；
+   面板不可见 / 引导进行中 → 只置脏标记，下次渲染带上。
+   @param {object} record 目标记录 @param {string} prevSourceType 变更前的来源类型 */
+function refreshRecordSourceDom(record, prevSourceType) {
+    panelContentDirty = true;
+    if (!record) return;
+
+    const newType = (record.source && record.source.type === 'native') ? 'native' : 'plugin';
+    const membershipChanged = isFilterActive() && !!prevSourceType && prevSourceType !== newType
+        && !filterState.source[newType];
+    if (membershipChanged) {
+        if (panelEl && isPanelVisible && !tourActive) renderPanelContent();
+        return;
+    }
+    if (!panelEl || !isPanelVisible || tourActive) return;
+
+    const idx = records.indexOf(record);
+    const listEl = idx >= 0 ? panelEl.querySelector('#rlog-list') : null;
+    const recordEl = listEl ? listEl.querySelector(`.rlog-record[data-record-index="${idx}"]`) : null;
+    if (!recordEl) {
+        /* 记录不在 DOM（被角色 / 模型筛选隐藏、或还在引导暂存队列）：只需刷新指示器与计数 */
+        updateFilterIndicator();
+        return;
+    }
+
+    recordEl.setAttribute('data-source', newType);
+    const badge = recordEl.querySelector('.rlog-source-badge');
+    if (badge) {
+        badge.className = `rlog-source-badge ${getSourceClass(record.source)}`;
+        badge.title = (record.source && record.source.detail) || getSourceLabel(record.source);
+        badge.innerHTML = `<span class="rlog-status-dot"></span>${escapeHtml(getSourceLabel(record.source))}`;
+    }
+    updateFilterIndicator();
+}
+
 function updateHeaderTitle() {
     if (!panelEl) return;
     const countEl = panelEl.querySelector('.rlog-title-count');
@@ -3395,9 +4398,7 @@ function renderPanelContent() {
     const listEl = panelEl.querySelector('#rlog-list');
     if (!listEl) return;
 
-    /* 计数格式统一由 updateHeaderTitle → getHeaderCountText 一处维护 */
     updateHeaderTitle();
-    /* 筛选指示器（「N隐藏」+ 按钮圆点）随每次渲染刷新 */
     updateFilterIndicator();
 
     if (records.length === 0) {
@@ -3427,16 +4428,14 @@ function renderPanelContent() {
         return;
     }
 
-    /* 状态标签槽位宽度：实测最宽标签并写入 CSS 变量， */
-    /* 等待占位与到达后的状态标签共用该宽度，回复到达不引起标题栏布局跳动 */
+    /* 状态标签槽位宽度写入 CSS 变量：等待占位与到达后的标签共用，避免标题栏布局跳动 */
     const statusMaxW = getReplyStatusMaxWidth();
     if (statusMaxW > 0) {
         panelEl.style.setProperty('--rlog-status-w', `${statusMaxW}px`);
     }
 
-    /* 只渲染可见记录；置顶记录先渲染，普通记录随后，两条子组内均保持 records 原顺序（新→旧）。
-       DOM 的 data-record-index 仍写入 records 中的真实索引，而非显示位置，
-       搜索/复制/删除/查看全文/回复挂载等按索引取数的路径无需改语义 */
+    /* 只渲染可见记录；置顶记录先渲染、普通记录随后，子组内保持 records 原顺序（新→旧）。
+       DOM 的 data-record-index 写入 records 中的真实索引而非显示位置，按索引取数的路径无需改语义 */
     const displayRecords = visibleRecords.filter(r => r.pinned)
         .concat(visibleRecords.filter(r => !r.pinned));
     const displayIndexes = displayRecords.map((rec) => records.indexOf(rec));
@@ -3451,13 +4450,11 @@ function renderPanelContent() {
             const sourceType = sourceClass === 'rlog-source-native' ? 'native' : 'plugin';
             const sourceTitle = (rec.source && rec.source.detail) || sourceLabel;
 
-            /* 判断整条记录是否所有消息都使用了精确 token（非估算值） */
             const allPrecise = rec.messages.every(m => m.tokenPrecise === true);
             const recordTokenPrefix = allPrecise ? '' : '~';
 
-            /* 角色筛选按子消息逐条过滤：只渲染可见子消息，
-               data-msg 仍写 messages 中的真实索引，复制/搜索/回复挂载等按索引取数无需改语义。
-               回复作为最后一条伪消息（data-msg = messages.length），与其他 role 子消息同形态 */
+            /* 角色筛选按子消息逐条过滤：只渲染可见子消息，data-msg 仍写真实索引；
+               回复作为最后一条伪消息（data-msg = messages.length），与其他子消息同形态 */
             const messagesHtml = rec.messages
                 .map((msg, mIdx) => ({ msg, mIdx }))
                 .filter(({ msg }) => isMessageVisible(msg))
@@ -3467,9 +4464,8 @@ function renderPanelContent() {
                     ? buildMessageHtml(rec.reply, idx, rec.messages.length)
                     : '');
 
-            /* 回复状态标记：仅折叠时显示在按钮组与折叠箭头之间（展开时隐藏，按钮区恢复正常）。 */
-            /* 回复在途（已建记录、尚未终态）时先输出透明占位，占住最宽标签的槽位， */
-            /* 到达后由 appendReplyToRecordDom 原位替换为状态标签，窄屏下不换行移位。 */
+            /* 回复状态标记：仅折叠时显示在按钮组与折叠箭头之间；回复在途时先输出透明占位占住槽位，
+               到达后由 appendReplyToRecordDom 原位替换为状态标签，窄屏下不换行移位 */
             const replyStatusHtml = rec.reply
                 ? `<span class="rlog-reply-status rlog-reply-status-${rec.reply.status}" title="${escapeHtml(getReplyStatusTitle(rec))}">${getReplyStatusLabel(rec.reply.status)}</span>`
                 : (rec.id != null && pendingReplies.has(rec.id)
@@ -3532,7 +4528,7 @@ function renderPanelContent() {
 }
 
 /* 同步每条记录的 --rlog-rec-h = 记录标题栏实际高度：消息标题栏的 sticky top 必须等于它才能吸在
-   记录标题栏正下方，而记录标题栏会因换行变高（窄屏可达 100px+），写死 40/36px 会被遮住。
+   记录标题栏正下方，而记录标题栏会因换行变高（窄屏可达 100px+），写死高度会被遮住。
    只在布局变化时写入，不参与逐帧滚动。 */
 function syncRecordHeaderVars(listEl) {
     if (!listEl) return;
@@ -3548,9 +4544,8 @@ function syncRecordHeaderVars(listEl) {
     listEl.querySelectorAll('.rlog-record').forEach((recordEl) => {
         const headerEl = recordEl.querySelector('.rlog-record-header');
         if (headerEl) {
-            /* 用 getBoundingClientRect().height（小数）而非 offsetHeight（取整）： */
-            /* 换行高度常为小数（如 65.59px），取整会让消息标题与记录标题之间 */
-            /* 出现亚像素缝隙（高分屏上肉眼可见 ~1px） */
+            /* 用 getBoundingClientRect().height（小数）而非 offsetHeight（取整）：
+               换行高度常为小数，取整会在消息标题与记录标题之间留下亚像素缝隙 */
             recordEl.style.setProperty('--rlog-rec-h', `${headerEl.getBoundingClientRect().height.toFixed(2)}px`);
             /* 标题栏高度变化（换行/字体/视口变化）时自动刷新偏移 */
             if (!observedRecordHeaders.has(headerEl)) {
@@ -3562,23 +4557,21 @@ function syncRecordHeaderVars(listEl) {
 }
 
 /* 滚动锚定：动作前后比较锚点在视口内的位置，上移超过 1px 就用位置差反向校正滚动。
-   只保 scrollTop 数值不够——恢复值会被浏览器静默钳到新上限，吸顶标题栏还会随容器变矮脱钉回落，
-   两种机制都会把标题栏顶出视口；展开时吸顶下移属正常行为，不校正。
+   只保 scrollTop 数值不够——恢复值会被浏览器静默钳到新上限，吸顶标题栏还会随容器变矮脱钉回落。
    折叠类操作必须传 anchorEl（被点击的记录/消息标题栏），否则钳制缺口会残留；展开类可不传。
    @param {Function} action @param {HTMLElement|null} [anchorEl] */
 function preserveScrollTop(action, anchorEl) {
     const listEl = panelEl ? panelEl.querySelector('#rlog-list') : null;
     if (!listEl) { action(); return; }
     const saved = listEl.scrollTop;
-    /* 锚点元素操作前的视口内相对位置（相对列表可视区顶部；吸顶时即吸顶位置） */
+    /* 锚点元素操作前相对列表可视区顶部的位置（吸顶时即吸顶位置） */
     let beforeRelTop = null;
     if (anchorEl) {
         beforeRelTop = anchorEl.getBoundingClientRect().top - listEl.getBoundingClientRect().top;
     }
     action();
     listEl.scrollTop = saved;
-    /* 锚点在视口内上移超过 1px（钳制或脱钉所致）时，用当前位置差反向校正， */
-    /* 让标题栏回到折叠前所在位置；下移（吸顶钉住）是正常行为，不校正 */
+    /* 锚点上移超过 1px（钳制或脱钉所致）时用位置差反向校正；下移（吸顶钉住）是正常行为 */
     if (anchorEl && beforeRelTop !== null) {
         const curRelTop = anchorEl.getBoundingClientRect().top - listEl.getBoundingClientRect().top;
         if (curRelTop - beforeRelTop < -1) {
@@ -3587,8 +4580,7 @@ function preserveScrollTop(action, anchorEl) {
     }
 }
 
-/* 为单个消息条目绑定交互事件（标题栏折叠/展开 + 复制按钮）。
-   既用于整表初始渲染，也用于回复到达时追加的单个 Response 条目。
+/* 为单个消息条目绑定交互事件（标题栏折叠/展开 + 复制按钮），整表渲染与回复追加共用。
    @param {HTMLElement} msgItem .rmsg-item 元素 */
 function bindMsgItemEvents(msgItem) {
     const header = msgItem.querySelector('.rmsg-header');
@@ -3635,8 +4627,7 @@ function bindListEvents(listEl) {
             if (e.target.closest('button')) return;
             /* 搜索框区域（输入框/计数/空白）不触发折叠/展开，保持搜索状态稳定 */
             if (e.target.closest('.rlog-search-box')) return;
-            /* 从搜索框内按下并拖动到外部松开时，click 目标为两者的共同祖先（header）， */
-            /* 此时不应触发折叠/展开，否则拖动选中文字越界会意外取消搜索面板 */
+            /* 从搜索框内按下、拖到外部松开时 click 目标是共同祖先 header，不应触发折叠/展开 */
             if (mouseDownInSearchBox) return;
             const recordEl = this.closest('.rlog-record');
             const idx = Number(recordEl.dataset.recordIndex);
@@ -3646,9 +4637,8 @@ function bindListEvents(listEl) {
             }, this);
         });
 
-        /* 长按记录标题栏切换置顶（Pointer Events：移动超容差或提前抬起即取消）：
-           折叠态整行可长按（含空白/状态标签/箭头），展开态只排除真实 <button> 与搜索框；
-           长按触发后抑制后续 click，避免与单击折叠/展开打架。 */
+        /* 长按记录标题栏切换置顶（Pointer Events：移动超容差或提前抬起即取消）；
+           长按触发后抑制后续 click，避免与单击折叠/展开打架 */
         let longPressTimer = null;
         let activePointerId = null;
         let currentPointerType = null;
@@ -3667,7 +4657,7 @@ function bindListEvents(listEl) {
             activePointerId = null;
         };
 
-        /* 长按是否应跳过：真实按钮始终排除；搜索框是交互区也排除（其余空白/状态都不防御性屏蔽） */
+        /* 长按是否应跳过：真实按钮与搜索框都排除，其余空白/状态不防御性屏蔽 */
         const isLongPressExcluded = (e) => e.target.closest('button') !== null
             || e.target.closest('.rlog-search-box') !== null;
 
@@ -3718,10 +4708,6 @@ function bindListEvents(listEl) {
         btn.addEventListener('click', function (e) {
             e.stopPropagation();
             const idx = Number(this.dataset.record);
-            /* 放大镜点击逻辑： */
-            /* - 未展开搜索菜单时 → 开启搜索菜单 */
-            /* - 已展开当前记录的搜索菜单 → 关闭搜索菜单 */
-            /* - 已展开其他记录的搜索菜单 → 关闭其他记录并开启当前记录的搜索 */
             if (searchState && searchState.recordIndex === idx) {
                 closeSearch();
             } else {
@@ -3772,7 +4758,6 @@ function bindListEvents(listEl) {
             const record = records[idx];
             if (!record) return;
 
-            /* 确认后再删除，避免误触 */
             showConfirmDialog({
                 title: '删除单条记录',
                 message: `确定要删除 <strong>${escapeHtml(record.characterName)}</strong> 的这条请求记录吗？<br>（${escapeHtml(record.timestamp)}，共 ${record.messages.length} 条消息）<br>此操作不可撤销。`,
@@ -3794,8 +4779,8 @@ function toggleRecordCollapse(index, recordEl) {
     resetSearchIfActive();
     records[index].collapsed = !records[index].collapsed;
     if (records[index].collapsed) {
-        /* 判定本次折叠是否触发「回顶」：折叠后列表内容变矮，浏览器会把 scrollTop */
-        /* 压回顶部；仅当折叠前已滚动、折叠后确实到顶，才认为发生了回顶 */
+        /* 折叠后列表内容变矮，浏览器会把 scrollTop 压回顶部；仅当折叠前已滚动、
+           折叠后确实到顶，才认为发生了回顶 */
         const listEl = panelEl ? panelEl.querySelector('#rlog-list') : null;
         const wasScrolled = !!(listEl && listEl.scrollTop > 1);
         recordCollapseToppedEl = null;
@@ -3809,9 +4794,8 @@ function toggleRecordCollapse(index, recordEl) {
     } else {
         recordEl.classList.add('expanded');
         recordEl.classList.remove('collapsed');
-        /* 折叠→展开后，内部子记录回到本条记录顶部：仅当本次折叠确实把列表压回顶部 */
-        /* 时，才对第一条子消息标题栏做提示闪烁；停留在顶部反复折叠/展开、 */
-        /* 以及新记录出现后的普通展开，都不闪 */
+        /* 仅当本次折叠确实把列表压回顶部时，才对第一条子消息标题栏闪烁提示；
+           停留在顶部反复折叠/展开、新记录出现后的普通展开都不闪 */
         if (recordCollapseToppedEl === recordEl) {
             const firstMsgHeader = recordEl.querySelector('.rmsg-item .rmsg-header');
             if (firstMsgHeader) triggerHeaderFlash(firstMsgHeader);
@@ -3822,8 +4806,8 @@ function toggleRecordCollapse(index, recordEl) {
     }
 }
 
-/* 切换单条记录的临时置顶：置顶不占普通记录上限、不被自动清理；从普通变置顶且记录展开时
-   折叠整条（子消息折叠态不变）；取消置顶不自动展开、恢复参与清理；不主动滚动，只用 toast 反馈。 */
+/* 切换单条记录的临时置顶：置顶不占普通记录上限、不被自动清理；置顶时折叠整条（子消息折叠态不变）；
+   取消置顶不自动展开、恢复参与清理；不主动滚动，只用 toast 反馈。 */
 function toggleRecordPinned(index, infoEl) {
     if (index < 0 || index >= records.length) return;
     const record = records[index];
@@ -3853,8 +4837,7 @@ function toggleRecordPinned(index, infoEl) {
         : '已取消置顶，将重新参与普通记录清理');
 }
 
-/* 显示置顶/取消置顶的轻量 toast（面板顶部居中）。
-   连续多次只替换文本并重置自动消失定时器，不堆叠。 */
+/* 显示置顶/取消置顶的轻量 toast（面板顶部居中）；连续多次只替换文本、重置定时器，不堆叠 */
 function showPinToast(text) {
     if (!panelEl) return;
     if (!pinToastEl) pinToastEl = panelEl.querySelector('#rlog-pin-toast');
@@ -3865,7 +4848,6 @@ function showPinToast(text) {
     pinToastTimer = setTimeout(hidePinToast, PIN_TOAST_DURATION_MS);
 }
 
-/* 隐藏置顶/取消置顶 toast（自动消失或点击提前消除）。 */
 function hidePinToast() {
     if (pinToastTimer !== null) {
         clearTimeout(pinToastTimer);
@@ -3896,16 +4878,15 @@ function beginHoverSuppress() {
 
     const onMouseMove = (e) => { if (e.pointerType === 'mouse') end(); };
 
-    /* 抑制类不随本次手势的 pointerup/pointercancel 清除（触屏浏览器会残留 :hover，重排还可能触发
-       pointercancel），改在「下一次 pointerdown / 鼠标 pointermove」时清除；不设兜底超时，
-       否则抑制自动恢复后残留的 hover 会再冒出来。 */
+    /* 抑制类不随本次手势的 pointerup/pointercancel 清除（触屏会残留 :hover，重排还可能触发
+       pointercancel），改在下一次 pointerdown / 鼠标 pointermove 时清除；不设兜底超时，
+       否则抑制自动恢复后残留的 hover 会再冒出来 */
     document.addEventListener('pointerdown', end, { capture: true });
     document.addEventListener('pointermove', onMouseMove, { capture: true });
 }
 
 function toggleMessageCollapse(recIdx, msgIdx, msgItem) {
-    /* 折叠/展开消息属于单条记录内部操作，不退出搜索模式 */
-    /* （搜索高亮保留在 DOM 中，折叠只是隐藏内容，展开后自动恢复可见） */
+    /* 折叠/展开消息属于单条记录内部操作，不退出搜索模式（搜索高亮保留在 DOM 中） */
     const record = records[recIdx];
     if (!record) return;
     const msg = getMessageByIndex(record, msgIdx);
@@ -3919,7 +4900,6 @@ function toggleMessageCollapse(recIdx, msgIdx, msgItem) {
     } else {
         msgItem.classList.add('expanded');
         msgItem.classList.remove('collapsed');
-        /* 展开消息后，内容区回到顶部 */
         const contentEl = msgItem.querySelector('.rmsg-content');
         if (contentEl) {
             contentEl.scrollTop = 0; /* 折叠后再展开时，从消息内容顶部开始看 */
@@ -3937,50 +4917,43 @@ function getMessageByIndex(record, msgIdx) {
     return null;
 }
 
-/* 标题栏「折叠所有条目」按钮 — 将所有记录折叠，同时将每条记录内的所有消息也折叠 */
+/* 标题栏「折叠所有条目」：折叠所有记录及其内部的所有消息 */
 function collapseAllEntries() {
-    /* 折叠全部条目前退出搜索模式 */
     resetSearchIfActive();
     if (records.length === 0) return;
-    /* 折叠全部记录时打断进行中的置底闪烁（展开后不再重播） */
     const listEl = panelEl ? panelEl.querySelector('#rlog-list') : null;
     clearHeaderFlash(listEl);
     records.forEach((r, i) => {
         r.collapsed = true;
-        /* 折叠该记录内的所有消息 */
         r.messages.forEach(m => { m.collapsed = true; });
         if (r.reply) r.reply.collapsed = true;
         const recordEl = panelEl.querySelector(`.rlog-record[data-record-index="${i}"]`);
         if (recordEl) {
             recordEl.classList.add('collapsed');
             recordEl.classList.remove('expanded');
-            /* 折叠所有消息 DOM */
             recordEl.querySelectorAll('.rmsg-item').forEach(el => {
                 el.classList.add('collapsed');
                 el.classList.remove('expanded');
             });
         }
     });
-    /* 折叠全部后回到顶部最新一条 */
     if (listEl) listEl.scrollTop = 0;
-    /* 折叠全部回顶：对顶部最新一条做提示闪烁 */
+    /* 回顶后对顶部最新一条做提示闪烁 */
     flashTopHint();
 }
 
-/* 单条记录「折叠所有消息」按钮 — 折叠本条记录内所有角色的消息，同时回到列表顶部
-   并对顶部（最新一条）做提示闪烁（与主标题栏「折叠所有条目」逻辑一致）
+/* 单条记录「折叠所有消息」：折叠本条内所有角色的消息，回滚到本条内最顶端角色消息标题栏并闪烁
+   （定位与闪烁目标都只认本条记录，与主标题栏「折叠所有条目」回列表顶部不同）
    @param {number} index 记录索引 */
 function collapseRecordMessages(index) {
-    /* 折叠本条记录的所有消息前退出搜索模式（搜索中的消息折叠后高亮无意义） */
+    /* 搜索中的消息折叠后高亮无意义，先退出搜索模式 */
     resetSearchIfActive();
     const record = records[index];
     if (!record || !record.messages) return;
 
-    /* 更新数据状态：全部折叠 */
     record.messages.forEach(m => { m.collapsed = true; });
     if (record.reply) record.reply.collapsed = true;
 
-    /* 更新 DOM */
     const listEl = panelEl ? panelEl.querySelector('#rlog-list') : null;
     const recordEl = listEl ? listEl.querySelector(`.rlog-record[data-record-index="${index}"]`) : null;
     if (recordEl) {
@@ -3990,24 +4963,22 @@ function collapseRecordMessages(index) {
             el.classList.add('collapsed');
             el.classList.remove('expanded');
         });
+        /* 回滚到本条记录（消息标题栏吸顶在本条记录标题栏之下），不再回列表顶部 */
+        scrollToRecordEl(recordEl);
+        /* 闪烁本条内最顶端的角色消息标题栏（DOM 顺序第一条即最顶端；角色筛选已在渲染阶段生效） */
+        triggerHeaderFlash(recordEl.querySelector('.rmsg-header'));
     }
-    /* 折叠本条所有消息后回到顶部（最新一条） */
-    if (listEl) listEl.scrollTop = 0;
-    /* 折叠本条所有消息回顶：对顶部最新一条做提示闪烁 */
-    flashTopHint();
 }
 
-/* 单条记录「展开所有消息」按钮 — 展开本条记录内所有角色的消息
+/* 单条记录「展开所有消息」：展开本条记录内所有角色的消息
    @param {number} index 记录索引 */
 function expandRecordMessages(index) {
     const record = records[index];
     if (!record || !record.messages) return;
 
-    /* 更新数据状态：全部展开 */
     record.messages.forEach(m => { m.collapsed = false; });
     if (record.reply) record.reply.collapsed = false;
 
-    /* 更新 DOM */
     const recordEl = panelEl.querySelector(`.rlog-record[data-record-index="${index}"]`);
     if (recordEl) {
         recordEl.querySelectorAll('.rmsg-item').forEach(el => {
@@ -4032,26 +5003,23 @@ function scrollToRecordBottom(index) {
     const headerEl = lastItemEl.querySelector('.rmsg-header');
     if (!headerEl) return;
 
-    /* 计算标题栏在列表内容中的逻辑位置。不直接读 sticky 标题栏的视觉坐标： */
-    /* 吸顶状态下 getBoundingClientRect 返回的是吸附后的位置而非自然位置。 */
-    /* item 不是 sticky，用它的矩形 + 标题栏相对 item 的 offsetTop 推算。 */
+    /* 计算标题栏在列表内容中的逻辑位置：吸顶状态下 getBoundingClientRect 返回的是吸附后的
+       位置而非自然位置，故用非 sticky 的 item 矩形 + 标题栏相对 item 的 offsetTop 推算 */
     const listRect = listEl.getBoundingClientRect();
     const itemRect = lastItemEl.getBoundingClientRect();
     const headerTopInList = listEl.scrollTop + itemRect.top - listRect.top + headerEl.offsetTop;
 
-    /* 目标：标题栏出现在记录标题栏（吸顶）正下方 8px 处 */
     const recordHeaderEl = recordEl.querySelector('.rlog-record-header');
     const stickyHeight = recordHeaderEl ? recordHeaderEl.getBoundingClientRect().height : 40;
     const targetScroll = Math.max(0, headerTopInList - stickyHeight - 8);
 
-    /* clamp 到合法滚动范围（避免浏览器静默 clamp 导致意外跳变） */
+    /* 夹到合法滚动范围 */
     const maxListScroll = Math.max(0, listEl.scrollHeight - listEl.clientHeight);
     const clampedListScroll = Math.max(0, Math.min(targetScroll, maxListScroll));
 
     /* 仅在需要调整时滚动（目标已可见时保持不动，闪烁照常触发） */
     if (Math.abs(clampedListScroll - listEl.scrollTop) > 1) {
-        /* 平滑滚动需要时间，闪烁等滚动到位后再触发（scrollend + 兜底定时器）， */
-        /* 避免「按钮刚点完动画已结束」：条目多/展开状态下跳转距离长时尤其明显 */
+        /* 平滑滚动需要时间，闪烁等滚动到位后再触发（scrollend + 兜底定时器） */
         cancelPendingFlash();
         pendingFlashHeader = headerEl;
         listEl.scrollTo({ top: clampedListScroll, behavior: getScrollBehavior() });
@@ -4069,8 +5037,7 @@ function scrollToRecordBottom(index) {
     }
 }
 
-/* 触发等待中的置底闪烁（滚动到位后调用）。
-   目标标题栏已被重建/移除时静默跳过（不闪），并清理兜底定时器。 */
+/* 触发等待中的置底闪烁（滚动到位后调用）；目标标题栏已被重建/移除时静默跳过 */
 function triggerDeferredFlash() {
     if (pendingFlashTimer !== null) {
         clearTimeout(pendingFlashTimer);
@@ -4083,7 +5050,6 @@ function triggerDeferredFlash() {
     }
 }
 
-/* 取消尚未触发的置底闪烁（连续点击、折叠/关闭面板等场景）。 */
 function cancelPendingFlash() {
     if (pendingFlashTimer !== null) {
         clearTimeout(pendingFlashTimer);
@@ -4092,8 +5058,7 @@ function cancelPendingFlash() {
     pendingFlashHeader = null;
 }
 
-/* 清除指定范围内的标题栏闪烁类，并取消该范围内待触发的闪烁。
-   折叠记录/消息时调用：动画直接打断结束，展开后不会重播。
+/* 清除指定范围内的标题栏闪烁类，并取消该范围内待触发的闪烁（折叠记录/消息时调用）。
    @param {HTMLElement} scopeEl 作用范围（记录、消息项或整个列表） */
 function clearHeaderFlash(scopeEl) {
     if (!scopeEl) return;
@@ -4102,24 +5067,21 @@ function clearHeaderFlash(scopeEl) {
         el.classList.remove('rlog-flash-bottom');
         cleared = true;
     });
-    /* 主动打断（折叠/关面板）后清空回顶时间戳：回复重渲染不再补闪，打断优先； */
-    /* 未打断任何闪烁时保留时间戳，正常补闪路径不受影响 */
+    /* 主动打断（折叠/关面板）后清空回顶时间戳，使回复重渲染不再补闪；未打断时保留 */
     if (cleared) lastTopHintFlashAt = 0;
     if (pendingFlashHeader && scopeEl.contains(pendingFlashHeader)) {
         cancelPendingFlash();
     }
 }
 
-/* 按真实 records 索引取当前列表中的记录 DOM 元素（渲染顺序可能与 records 顺序不同，
-   但 data-record-index 始终写真实索引，故查询可用）。 */
+/* 按真实 records 索引取列表中的记录 DOM 元素（data-record-index 始终写真实索引） */
 function getRecordElByIndex(index) {
     if (!panelEl) return null;
     const listEl = panelEl.querySelector('#rlog-list');
     return listEl ? listEl.querySelector(`.rlog-record[data-record-index="${index}"]`) : null;
 }
 
-/* 滚动列表，使指定记录标题栏出现在可视区顶部（置顶记录可能排在目标记录上方）。
-   用视图坐标差计算，避免依赖 offsetTop 与定位父级。 */
+/* 滚动列表，使指定记录标题栏出现在可视区顶部（用视图坐标差计算，不依赖 offsetTop） */
 function scrollToRecordEl(recordEl) {
     if (!panelEl || !recordEl) return;
     const listEl = panelEl.querySelector('#rlog-list');
@@ -4134,8 +5096,8 @@ function scrollToRecordEl(recordEl) {
     }
 }
 
-/* 无按钮回顶的提示闪烁：回到顶部后对顶部（最新）记录做与置底相同的闪烁。展开时闪第一条
-   子消息标题栏（与置底镜像），折叠/不可见时闪记录标题栏；面板未打开或窗口折叠时不触发。 */
+/* 无按钮回顶的提示闪烁：展开时闪第一条子消息标题栏，折叠/不可见时闪记录标题栏；
+   面板未打开或窗口折叠时不触发 */
 function flashTopHint(recordEl) {
     if (!panelEl || !isPanelVisible || isPanelCollapsed) return;
     const listEl = panelEl.querySelector('#rlog-list');
@@ -4151,12 +5113,12 @@ function flashTopHint(recordEl) {
     }
 }
 
-/* 子消息标题栏底色闪烁：先移除类 + 强制回流再添加，保证可重播；每个标题栏只挂一次
-   animationend 监听，动画结束自动移除类。@param {HTMLElement} headerEl */
+/* 标题栏底色闪烁：先移除类 + 强制回流再添加，保证可重播
+   @param {HTMLElement} headerEl */
 function triggerHeaderFlash(headerEl) {
     if (!headerEl) return;
-    /* 极简模式：不做标题栏底色闪烁（仅保留滚动定位），同时避免 animation:none 下
-       animationend 不触发导致 .rlog-flash-bottom 类残留。 */
+    /* 极简模式：不做闪烁（仅保留滚动定位），也避免 animation:none 下 animationend
+       不触发导致 .rlog-flash-bottom 类残留 */
     if (preferences.minimal) return;
     headerEl.classList.remove('rlog-flash-bottom');
     void headerEl.offsetWidth; /* 强制回流，确保重复点击可重播动画 */
@@ -4174,7 +5136,7 @@ function triggerHeaderFlash(headerEl) {
 
 /* ── 记录删除与复制 ──────────────────────── */
 
-/* 单条记录「删除」按钮 — 从列表中移除本条记录
+/* 单条记录「删除」：从列表中移除本条记录
    @param {number} index 记录索引 */
 
 function deleteRecord(index) {
@@ -4241,8 +5203,7 @@ function showCopyFeedback(btnEl, success) {
 
 /* ── 查看全文覆盖层 ──────────────────────── */
 
-/* 取覆盖层内容区的文本
-   @param {object} record @param {string} format formatted 或 raw @returns {string} */
+/* 取覆盖层内容区的文本 @param {object} record @param {string} format formatted 或 raw @returns {string} */
 function getReadContent(record, format) {
     if (format === 'raw') {
         if (!record.rawBody) {
@@ -4257,8 +5218,6 @@ function getReadContent(record, format) {
     return getFullPromptText(record);
 }
 
-/* 切换覆盖层显示格式并刷新内容区
-   @param {string} format 'formatted' 或 'raw' */
 function switchReadFormat(format) {
     if (!readFullOverlayEl) return;
     readFullFormat = format;
@@ -4268,10 +5227,9 @@ function switchReadFormat(format) {
     const contentEl = readFullOverlayEl.querySelector('.rlog-read-content');
     if (contentEl) {
         contentEl.textContent = getReadContent(record, format);
-        contentEl.scrollTop = 0; /* 切换格式时回到顶部 */
+        contentEl.scrollTop = 0;
     }
 
-    /* 更新 toggle 状态 */
     const toggleEl = readFullOverlayEl.querySelector('.rlog-read-format-btn');
     if (toggleEl) {
         if (format === 'raw') {
@@ -4284,8 +5242,7 @@ function switchReadFormat(format) {
     }
 }
 
-/* 「查看全文」覆盖层回顶/置底：直接滚动内容区到顶部/底部。
-   覆盖层是连续长文本（无具体条目），只做功能滚动、不做闪烁动画。
+/* 「查看全文」覆盖层回顶/置底：直接滚动内容区（连续长文本，只做功能滚动、不做闪烁动画）
    @param {'top'|'bottom'} position 滚动目标：'top' 顶部 / 'bottom' 底部 */
 function scrollReadContentTo(position) {
     if (!readFullOverlayEl) return;
@@ -4298,7 +5255,6 @@ function scrollReadContentTo(position) {
     });
 }
 
-/* 关闭「查看全文」覆盖层并从 DOM 中移除 */
 function closeReadFullOverlay() {
     if (readFullOverlayEl) {
         /* 清理覆盖层内容区的自定义滚动条，避免残留 */
@@ -4310,20 +5266,17 @@ function closeReadFullOverlay() {
         readFullOverlayEl = null;
     }
     readFullRecordIndex = null;
-    /* 解绑 Escape 键监听 */
     document.removeEventListener('keydown', handleReadFullEscape);
 }
 
-/* Escape 键关闭覆盖层的处理器
-   @param {KeyboardEvent} e 键盘事件 */
+/* Escape 键关闭覆盖层的处理器 @param {KeyboardEvent} e 键盘事件 */
 function handleReadFullEscape(e) {
     if (e.key === 'Escape' && readFullOverlayEl) {
         closeReadFullOverlay();
     }
 }
 
-/* 打开「查看全文」覆盖层，展示指定记录的完整提示词
-   覆盖层挂载到 #rlog-panel 内部，完整遮挡面板（含主标题栏）。
+/* 打开「查看全文」覆盖层，展示指定记录的完整提示词；覆盖层挂到 #rlog-panel 内、完整遮挡面板
    @param {number} index 记录索引 */
 function openReadFullOverlay(index) {
     /* 先退出搜索模式（覆盖层打开期间搜索不可见不可操作） */
@@ -4332,13 +5285,12 @@ function openReadFullOverlay(index) {
     const record = records[index];
     if (!record || !panelEl) return;
 
-    /* 懒创建：关闭旧的覆盖层（如有） */
+    /* 关闭旧的覆盖层（如有） */
     closeReadFullOverlay();
 
     readFullRecordIndex = index;
     readFullFormat = 'formatted';
 
-    /* 创建覆盖层 */
     const overlay = document.createElement('div');
     overlay.className = 'rlog-read-overlay';
 
@@ -4369,11 +5321,9 @@ function openReadFullOverlay(index) {
     const contentEl = overlay.querySelector('.rlog-read-content');
     contentEl.textContent = getReadContent(record, 'formatted');
 
-    /* 绑定标题栏事件 */
     const toggleEl = overlay.querySelector('.rlog-read-format-btn');
     toggleEl.addEventListener('click', (e) => {
         e.stopPropagation();
-        /* 切换格式：当前 formatted → raw；raw → formatted */
         switchReadFormat(readFullFormat === 'formatted' ? 'raw' : 'formatted');
     });
 
@@ -4402,7 +5352,6 @@ function openReadFullOverlay(index) {
         closeReadFullOverlay();
     });
 
-    /* 挂载到面板内部，覆盖整个面板 */
     panelEl.appendChild(overlay);
     readFullOverlayEl = overlay;
 
@@ -4412,7 +5361,6 @@ function openReadFullOverlay(index) {
         queueScrollbarsForEls([readContentElForScroll]);
     }
 
-    /* 绑定 Escape 键关闭 */
     document.addEventListener('keydown', handleReadFullEscape);
 }
 
@@ -4446,8 +5394,7 @@ let thumbFullUpdatePending = false;
 /* HTMLElement|null: 单个需要更新 thumb 的 contentEl（scroll 事件触发） */
 let thumbPendingElement = null;
 
-/* 确保共享 ResizeObserver 已创建
-   所有进度条统一由它监听，回调中批量更新 thumb，避免 100+ 个独立 ResizeObserver 的额外开销 */
+/* 确保共享 ResizeObserver 已创建：所有进度条统一由它监听，避免 100+ 个独立观察者的额外开销 */
 function ensureSharedResizeObserver() {
     if (sharedResizeObserver) return;
     sharedResizeObserver = new ResizeObserver((entries) => {
@@ -4461,8 +5408,7 @@ function ensureSharedResizeObserver() {
                 }
             }
         }
-        /* 任一内容区尺寸变化：全量更新所有进度条的 thumb */
-        /* 回调本身由浏览器在布局后批量触发，这里再合并到同一 RAF 帧 */
+        /* 任一内容区尺寸变化：合并到同一 RAF 帧做全量 thumb 更新 */
         requestThumbUpdate();
     });
 }
@@ -4512,7 +5458,7 @@ function requestThumbUpdate(contentEl) {
     });
 }
 
-/* 根据 contentEl 当前滚动状态更新其进度条 thumb 位置
+/* 根据 contentEl 滚动状态更新进度条 thumb 位置
    @param {HTMLElement} contentEl 内容区元素
    @param {object} cleanup 该进度条的清理数据（含 hitboxEl/thumbEl） */
 function updateScrollbarThumb(contentEl, cleanup) {
@@ -4539,15 +5485,12 @@ function updateScrollbarThumb(contentEl, cleanup) {
     /* 轨道可用高度（track 的 top:4px, bottom:4px） */
     const trackHeight = clientHeight - 8;
 
-    /* 滑块高度 = 可见比例 × 轨道高度，最小 20px */
     const thumbRatio = clientHeight / scrollHeight;
     const thumbHeight = Math.max(20, thumbRatio * trackHeight);
     thumb.style.height = thumbHeight + 'px';
 
-    /* 滑块可移动范围 */
     const thumbRange = trackHeight - thumbHeight;
 
-    /* 滑块位置 = 当前滚动比例 × 可移动范围 */
     const thumbTop = maxScroll > 0 ? (scrollTop / maxScroll) * thumbRange : 0;
     thumb.style.top = thumbTop.toFixed(1) + 'px';
 }
@@ -4571,16 +5514,14 @@ function queueScrollbarsForEls(contentEls) {
 /* 为单个 .rmsg-content 元素创建 overlay 进度条
    @param {HTMLElement} contentEl .rmsg-content 元素 */
 function createScrollbarForContent(contentEl) {
-    /* 先清理已有进度条（避免重复创建） */
     detachScrollbarForContent(contentEl);
 
-    /* 内容不需要滚动时不需要进度条 */
-    /* 注意：这里读取 scrollHeight 布局值不可避免，但仅在进入视口时才执行（懒创建 + 单个元素） */
+    /* 内容不需要滚动时不需要进度条；这里读 scrollHeight 布局值不可避免，
+       但仅在进入视口时才执行（懒创建 + 单个元素） */
     if (contentEl.scrollHeight <= contentEl.clientHeight) return;
 
-    /* 挂载目标二选一（在 contentEl 的父容器上，而不是 contentEl 内部）： */
-    /* - .rmsg-content → 挂载到 .rmsg-item（旧路径，行为完全不变） */
-    /* - .rlog-read-content → 挂载到 .rlog-read-overlay（新路径） */
+    /* 挂载在 contentEl 的父容器上（非 contentEl 内部）：
+       .rmsg-content → .rmsg-item；.rlog-read-content → .rlog-read-overlay */
     /* 这样 hitbox 使用 position: absolute 定位时不会随 contentEl 滚动而移出视口 */
     const container = contentEl.parentElement;
     if (!container) return;
@@ -4590,7 +5531,6 @@ function createScrollbarForContent(contentEl) {
     if (!isRmsgItem && !isReadOverlay) return;
 
     /* 确保容器有 position: relative 作为定位参考 */
-    /* 对 .rmsg-item 保持旧行为；对 .rlog-read-overlay 为兜底（其本身是 absolute） */
     const currentPosition = getComputedStyle(container).position;
     if (currentPosition === 'static') {
         container.style.position = 'relative';
@@ -4615,18 +5555,15 @@ function createScrollbarForContent(contentEl) {
     hitbox.appendChild(dot);
     container.appendChild(hitbox);
 
-    /* 记录到活跃元素集合（供共享 ResizeObserver 批量更新） */
     scrollbarElements.add(contentEl);
 
-    /* 创建清理数据（scrollbarCleanups 注册后即可被 requestThumbUpdate 使用） */
     const cleanup = {
         scrollHandler: null,
         hitboxEl: hitbox,
         thumbEl: thumb,
     };
 
-    /* 初始更新：合并到 RAF 批处理（当前帧剩余 layout 在下一帧统一完成） */
-    /* 注意：需要先注册 cleanup 才能被 updateScrollbarThumb 找到 */
+    /* 先注册 cleanup 再请求初始更新（updateScrollbarThumb 依赖它查找元素） */
     scrollbarCleanups.set(contentEl, cleanup);
     requestThumbUpdate(contentEl);
 
@@ -4635,7 +5572,6 @@ function createScrollbarForContent(contentEl) {
     cleanup.scrollHandler = onScroll;
     contentEl.addEventListener('scroll', onScroll, { passive: true });
 
-    /* 确保共享 ResizeObserver 已注册覆盖此元素 */
     ensureSharedResizeObserver();
     if (sharedResizeObserver) {
         try {
@@ -4643,8 +5579,7 @@ function createScrollbarForContent(contentEl) {
         } catch (e) { /* ignore */ }
     }
 
-    /* --- 交互：pointer 事件 --- */
-    /* 圆点跟随手指位置（不跟随 thumb），可到达轨道两端 */
+    /* --- 交互：圆点跟随手指位置（不跟随 thumb），可到达轨道两端 --- */
     /* boolean: 是否正在拖拽 */
     let dragging = false;
     /* number|null: 当前 pointerId（用于 pointer capture） */
@@ -4658,15 +5593,13 @@ function createScrollbarForContent(contentEl) {
         /* 手指相对 hitbox 顶部的 Y 偏移（dot 是 hitbox 子元素，style.top 相对于 hitbox） */
         let relativeY = clientY - hitboxRect.top;
 
-        /* 【可调参数】TRACK_PADDING — 轨道距 hitbox 边缘的间距 */
-        /* 必须与 CSS 中 .rlog-scroll-track 的 top/bottom 值保持一致 */
+        /* 轨道距 hitbox 边缘的间距，必须与 CSS 中 .rlog-scroll-track 的 top/bottom 一致 */
         const TRACK_PADDING = 4;          /* CSS: .rlog-scroll-track { top: 4px; bottom: 4px; } */
         const trackTop = TRACK_PADDING;
         const trackBottom = hitboxRect.height - TRACK_PADDING;
         relativeY = Math.max(trackTop, Math.min(trackBottom, relativeY));
 
-        /* 【可调参数】DOT_HALF — 圆点高度的一半 */
-        /* 必须与 CSS 中 .rlog-scroll-dot 的 height 值保持一致 (height/2) */
+        /* 圆点高度的一半，必须与 CSS 中 .rlog-scroll-dot 的 height 一致 */
         const DOT_HALF = 2.5;               /* CSS: .rlog-scroll-dot { height: 6px; } → 6/2=3 */
         return (relativeY - DOT_HALF) + 'px';
     }
@@ -4686,7 +5619,6 @@ function createScrollbarForContent(contentEl) {
         const trackBottom = trackTop + trackHeight;
         relativeY = Math.max(trackTop, Math.min(trackBottom, relativeY));
 
-        /* 圆点在轨道中的比例（0~1） */
         const ratio = (relativeY - trackTop) / trackHeight;
         return Math.round(ratio * maxScroll);
     }
@@ -4700,7 +5632,6 @@ function createScrollbarForContent(contentEl) {
         hitbox.setPointerCapture(e.pointerId);
         hitbox.classList.add('active');
 
-        /* 立即将圆点定位到按下位置，并滚动到对应位置 */
         dot.style.top = clientYToDotTop(e.clientY);
         contentEl.scrollTop = dotPositionToScroll(e.clientY);
         e.preventDefault();
@@ -4712,9 +5643,7 @@ function createScrollbarForContent(contentEl) {
         const maxScroll = contentEl.scrollHeight - contentEl.clientHeight;
         if (maxScroll <= 0) return;
 
-        /* 圆点跟随手指 */
         dot.style.top = clientYToDotTop(e.clientY);
-        /* 内容滚动跟随圆点 */
         contentEl.scrollTop = dotPositionToScroll(e.clientY);
 
         e.preventDefault();
@@ -4745,34 +5674,30 @@ function detachScrollbarForContent(contentEl) {
     const cleanup = scrollbarCleanups.get(contentEl);
     if (!cleanup) return;
 
-    /* 移除 scroll 事件监听 */
     contentEl.removeEventListener('scroll', cleanup.scrollHandler);
-    /* 若该元素被共享 ResizeObserver 监听，解除监听 */
     if (sharedResizeObserver) {
         try { sharedResizeObserver.unobserve(contentEl); } catch (e) { /* ignore */ }
     }
-    /* 从活跃集合与懒观察集合中移除 */
     scrollbarElements.delete(contentEl);
     pendingScrollbarContentEls.delete(contentEl);
     if (scrollbarLazyObserver) {
         try { scrollbarLazyObserver.unobserve(contentEl); } catch (e) { /* ignore */ }
     }
-    /* 从 DOM 中移除 hitbox */
     if (cleanup.hitboxEl && cleanup.hitboxEl.parentNode) {
         cleanup.hitboxEl.remove();
     }
     scrollbarCleanups.delete(contentEl);
 }
 
-/* 为列表内所有 .rmsg-content 创建/刷新进度条（renderPanelContent 后与展开/折叠后调用）。
-   懒创建：接近视口才建，避免一次性创建大量进度条卡顿。@param {HTMLElement} listEl */
+/* 为列表内所有 .rmsg-content 创建/刷新进度条（重建 DOM 后与展开/折叠后调用），懒创建避免批量卡顿
+   @param {HTMLElement} listEl */
 function attachScrollIndicators(listEl) {
     /* 清理所有已有进度条（因为 renderPanelContent 使用 innerHTML 重建了 DOM） */
     scrollbarCleanups.forEach((_, contentEl) => {
         detachScrollbarForContent(contentEl);
     });
 
-    /* 所有 .rmsg-content 进入懒创建观察队列（IntersectionObserver 自动按视口按需创建） */
+    /* 全部进入懒创建观察队列，由 IntersectionObserver 按视口按需创建 */
     queueScrollbarsForEls(listEl.querySelectorAll('.rmsg-content'));
 }
 
@@ -4811,8 +5736,7 @@ function getDefaultBadgePos() {
     );
 }
 
-/* 浮标尺寸同步：host 的宽/高随桌面 34 / 移动 30 切换（getBadgeSize 已按断点返回）。
-   初始化与 resize 时调用，避免桌面↔移动切换后尺寸不同步。 */
+/* 浮标尺寸同步：host 宽/高按断点切换，初始化与 resize 时调用 */
 function updateBadgeSize() {
     if (!badgeEl) return;
     const size = getBadgeSize();
@@ -4821,7 +5745,7 @@ function updateBadgeSize() {
 }
 
 /* ST 当前是否深色主题：读 --SmartThemeBlurTintColor 算相对感知亮度 < 阈值判深色；
-   读不到/不认识/解析失败一律按深色（退回深色浮标，与 ST 默认主题方向一致）。@returns {boolean} */
+   读不到/不认识/解析失败一律按深色（退回深色浮标）。@returns {boolean} */
 function isStThemeDark() {
     let raw = '';
     try {
@@ -4833,8 +5757,7 @@ function isStThemeDark() {
 }
 
 /* 同步浮标配色：浅色 ST → 深色浮标、深色 ST → 浅色浮标（始终反向，保证对比度）。
-   只在浮标宿主上加减 .rlog-badge-light，配色数值仍在总表；判定结果没变时不动 DOM，
-   免得无关写入打断配色过渡。 */
+   只在浮标宿主上加减 .rlog-badge-light（配色数值在总表）；判定结果没变时不动 DOM，免得打断过渡。 */
 function syncBadgeTheme() {
     if (!badgeEl) return;
     const isDark = isStThemeDark();
@@ -4844,8 +5767,8 @@ function syncBadgeTheme() {
     badgeEl.classList.toggle('rlog-badge-light', isDark);
 }
 
-/* 初始化浮标配色的主题跟随：先同步一次，再监听 <html> 的 style 属性（当前 ST 切主题/改色都会把
-   --SmartTheme* 写到那里，ST 没有主题变化事件）。挂点将来失效只表现为浮标配色不再更新（fail-safe）。 */
+/* 初始化浮标配色的主题跟随：先同步一次，再监听 <html> 的 style 属性（ST 没有主题变化事件）；
+   挂点将来失效只表现为浮标配色不再更新 */
 function initBadgeThemeSync() {
     syncBadgeTheme();
     if (badgeThemeObserver) return;
@@ -4853,9 +5776,8 @@ function initBadgeThemeSync() {
     badgeThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
 }
 
-/* 重置面板为默认定位/尺寸：清掉拖拽/缩放写入的 inline 样式，让 CSS 默认值生效
-   （top:80px + left:50% + translateX(-50%) + 宽高/上下限走 style.css）。默认定位本就在视口内，
-   不做额外边界修正。 */
+/* 重置面板为默认定位/尺寸：清掉拖拽/缩放写入的 inline 样式，让 style.css 的默认值生效
+   （默认定位本就在视口内，不做额外边界修正） */
 function resetPanelToDefault() {
     if (!panelEl) return;
     panelEl.style.left = '';
@@ -4884,9 +5806,8 @@ function setBadgeActive(active) {
 function togglePanelWindow(ev) {
     isPanelCollapsed = !isPanelCollapsed;
     if (isPanelCollapsed) {
-        /* 收起为浮标：会话内首次收起以当次点击标题文字的坐标作为浮标中心并记录；
-           会话内再次收起复用记录的位置（拖动过后即为拖动后位置）。
-           展开/拖动标题栏不影响记录值；刷新/重新初始化后 badgePos 重置为 null，按首次收起处理。 */
+        /* 收起为浮标：会话内首次收起记下当次点击坐标作为浮标中心，再次收起复用记录的位置
+           （拖动后即为拖动后位置）；刷新后 badgePos 重置为 null，按首次收起处理 */
         hidePinToast();
         panelEl.classList.add('rlog-window-collapsed');
         panelEl.style.display = 'none';
@@ -4905,7 +5826,6 @@ function togglePanelWindow(ev) {
         }
         setBadgeActive(true);
     } else {
-        /* 恢复面板：隐藏浮标，把面板重置为默认定位/尺寸后重新显示 */
         setBadgeActive(false);
         panelEl.classList.remove('rlog-window-collapsed');
         panelEl.style.display = 'flex';
@@ -4946,8 +5866,7 @@ function addMenuEntry() {
     toggleBtn.addEventListener('click', togglePanel);
     menu.appendChild(toggleBtn);
 
-    /* 延迟重新 append，确保在所有同步初始化的插件之后排在末尾 */
-    /* appendChild 对已存在的节点会将其移动到容器末尾 */
+    /* 延迟重新 append，确保排在所有同步初始化的插件之后（appendChild 会移动已有节点） */
     setTimeout(() => {
         if (toggleBtn && toggleBtn.parentNode) {
             toggleBtn.parentNode.appendChild(toggleBtn);
@@ -4984,9 +5903,9 @@ function closeDrawerInstant(drawer, btn) {
     drawer.style.transition = '';
 }
 
-/* 定位本插件自身的 style.css 真实地址：优先用 ST 已注入的插件样式 <link>（id 形如 "<目录>-css"，
-   这里按插件目录名 RecentRequestLog 匹配），找不到时回退硬编码路径（与 loadTourScript 兜底一致）。
-   不用 import.meta：ST 以 ES Module 加载时 document.currentScript 为 null，且逻辑测试用 Node VM 载入本文件（非 module）。 */
+/* 定位本插件自身的 style.css 真实地址：优先用 ST 已注入的插件样式 <link>（id 形如 "<目录>-css"），
+   找不到时回退硬编码路径。不用 import.meta：ST 以 ES Module 加载时 document.currentScript 为 null，
+   且逻辑测试用 Node VM 载入本文件（非 module）。 */
 function getSelfCssUrl() {
     try {
         const link = [...document.querySelectorAll('link[rel="stylesheet"]')].find(l => l.id && l.id.endsWith('RecentRequestLog-css'));
@@ -4995,9 +5914,9 @@ function getSelfCssUrl() {
     return '/scripts/extensions/third-party/RecentRequestLog/style.css';
 }
 
-/* 影子内样式源（优先）：从 ST 已加载的本插件 style.css <link> 的样式表规则同步拷贝成影子内 <style>。
-   这样影子内样式立即生效，避免用 <link> 异步加载导致早期测量（如状态占位宽度探针）采不到 class 样式。
-   面板影子根与浮标影子根各要一份（调用两次），规则序列化走 selfCssTextCache 只做一次。 */
+/* 影子内样式源（优先）：从 ST 已加载的本插件 style.css <link> 同步拷贝规则成影子内 <style>，
+   避免 <link> 异步加载导致早期测量（如状态占位宽度探针）采不到 class 样式。
+   面板影子根与浮标影子根各要一份；规则序列化走 selfCssTextCache 只做一次。 */
 function buildSelfCssElement() {
     try {
         const selfCssUrl = getSelfCssUrl();
@@ -5030,13 +5949,11 @@ function buildSelfCssLink() {
    - 只写插件实际使用的 33 个图标的 ::before content；新增图标在 FA_SOLID_CONTENT 补一行 */
 function buildFaShimStyle() {
     const style = document.createElement('style');
-    /* 影子内复用 ST 现有 fa-solid-900 字体文件（绝对地址，不下载不复制）；在浏览器运行时换算一次 */
     const faWoff2 = new URL('webfonts/fa-solid-900.woff2', location.href).href;
     const faTtf = new URL('webfonts/fa-solid-900.ttf', location.href).href;
     const rules = [
-        /* 影子内通用基准：ST 全局 * 的 box-sizing/字体平滑等不进入影子，这里补上。
-           text-shadow 是可继承属性，ST 全局 * 会命中挂在 body 下的 shadow host 把主题辉光渗进来，
-           必须重置为 none；不补基准的话元素默认 content-box，min-width/padding 计算会与旧版不一致。 */
+        /* 影子内通用基准：ST 全局 * 的 box-sizing/字体平滑等进不了影子，这里补上；
+           text-shadow 是可继承属性，ST 全局 * 会经 shadow host 把主题辉光渗进来，必须重置为 none。 */
         '*,*::before,*::after{box-sizing:border-box;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;-webkit-tap-highlight-color:transparent;text-shadow:none}',
         '@font-face{font-family:"Font Awesome 6 Free";font-style:normal;font-weight:900;font-display:block;'
             + `src:url("${faWoff2}") format("woff2"),url("${faTtf}") format("truetype")}`,
@@ -5051,9 +5968,8 @@ function buildFaShimStyle() {
 }
 
 /* 影子内「极简模式」样式：用 :host(.rlog-minimal) 一次性关掉面板/弹窗的全部过渡与动画
-   （设置上限/确认弹窗与 #rlog-panel 平级，只有 :host 能同时兜住），保留瞬时状态反馈；
-   去掉偏好浮层的 1px 虚化；显式豁免使用引导（.rlog-tour-*）。
-   这类 :host 规则不能写进外部 style.css（文档里的 :host 会被丢弃、也拷不进影子），只能在 JS 运行时注入。 */
+   （弹窗与 #rlog-panel 平级，只有 :host 能同时兜住），保留瞬时状态反馈；去掉偏好浮层的虚化；
+   显式豁免使用引导（.rlog-tour-*）。这类 :host 规则只能在 JS 运行时注入，写进 style.css 会被丢弃。 */
 function buildMinimalShimStyle() {
     const style = document.createElement('style');
     const rules = [
@@ -5224,7 +6140,7 @@ function buildUI() {
 
     panelEl.classList.remove('rlog-window-collapsed');
 
-    /* 影子 DOM 隔离：宿主 + 影子根，面板与其样式放进影子，从而不被第三方主题 CSS 覆盖 */
+    /* 影子 DOM 隔离：宿主 + 影子根，面板与其样式放进影子，不被第三方主题 CSS 覆盖 */
     shadowHostEl = document.createElement('div');
     shadowHostEl.id = 'rlog-shadow-host';
     panelShadowRoot = shadowHostEl.attachShadow({ mode: 'open' });
@@ -5236,8 +6152,7 @@ function buildUI() {
 
     /* 浮标：独立 light DOM host（#rlog-badge-host）+ 自己的 shadow root。
        host 暴露在普通 DOM（带 script_id/role/title/class/固定定位）供第三方收纳识别；
-       可见视觉在 host 的 shadow root 内（.rlog-badge-visual），第三方主题碰不到；
-       另放一个不渲染的 light DOM 图标供收纳插件 querySelector(i) 提取。host 只承担定位/尺寸。 */
+       可见视觉在 host 的 shadow root 内（.rlog-badge-visual），第三方主题碰不到。 */
     badgeEl = document.createElement('div');
     badgeEl.id = 'rlog-badge-host';
     badgeEl.className = 'rlog-badge-host rlog-floating-button';
@@ -5249,13 +6164,11 @@ function buildUI() {
         `position:fixed;display:none;width:${getBadgeSize()}px;height:${getBadgeSize()}px;`
         + 'cursor:pointer;z-index:2999;box-sizing:border-box;background:transparent;border:0;padding:0;margin:0;';
     /* light DOM 图标：供第三方收纳插件 querySelector(i) 读入口图标。宿主有自己的 shadow root，
-       light 子元素本就不参与渲染；hidden 只是意图声明——ST 的 FA CSS 会给 .fa-solid 设 display，
-       会盖过 [hidden]，别指望它保证不显形。 */
+       light 子元素本就不参与渲染；hidden 只是意图声明——ST 的 FA CSS 会给 .fa-solid 设 display。 */
     badgeEl.innerHTML = '<i class="fa-solid fa-clock-rotate-left" hidden></i>';
 
     const badgeShadowRoot = badgeEl.attachShadow({ mode: 'open' });
-    /* 浮标可见视觉的样式来源：本插件 style.css 的「13. 浮标」区
-       （与面板影子根同款做法——把同一份 style.css 复制进影子根，样式集中在 style.css 一处维护） */
+    /* 浮标可见视觉的样式来源：与面板影子根同款做法，把同一份 style.css 复制进影子根 */
     badgeShadowRoot.appendChild(buildSelfCssElement());
     badgeShadowRoot.appendChild(buildFaShimStyle());
     badgeVisualEl = document.createElement('div');
@@ -5292,17 +6205,14 @@ function buildUI() {
             e.stopPropagation();
 
             if (countClickTimer) {
-                /* 第二次点击 —— 判定为双击 */
                 clearTimeout(countClickTimer);
                 countClickTimer = null;
                 showMaxRecordsDialog();
                 return;
             }
 
-            /* 第一次点击 —— 启动定时器，等待可能的第二次点击 */
             countClickTimer = setTimeout(() => {
                 countClickTimer = null;
-                /* 单击无反应，不做任何操作 */
             }, DOUBLE_CLICK_THRESHOLD);
         });
     }
@@ -5331,7 +6241,6 @@ function buildUI() {
     filterBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (moreDrawer.classList.contains('expanded')) {
-            /* 切换抽屉：旧抽屉瞬时收起（跳过过渡），新抽屉正常展开，避免两抽屉宽度叠加弹跳 */
             closeDrawerInstant(moreDrawer, moreBtn);
         } else {
             closeMoreDrawer();
@@ -5344,7 +6253,6 @@ function buildUI() {
         }
     });
 
-    /* 筛选分段按钮点击：切换对应分组的开关 */
     filterDrawer.querySelectorAll('.rlog-filter-chip').forEach((chip) => {
         chip.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -5352,7 +6260,6 @@ function buildUI() {
         });
     });
 
-    /* 标题旁「重置筛选」按钮 */
     const filterResetBtn = panelEl.querySelector('#rlog-filter-reset-btn');
     if (filterResetBtn) {
         filterResetBtn.addEventListener('click', (e) => {
@@ -5381,16 +6288,15 @@ function buildUI() {
         });
     }
 
-    /* 全局点击监听：开启「点击面板外关闭」时，点在面板外就关面板。要点：
-       ① 影子内点击会重定向到 #rlog-shadow-host，用 e.target === shadowHostEl ||
-       e.composedPath().includes(panelEl) 判定面板内；② 放行插件自己的菜单切换按钮，否则用它
-       「打开面板」的那次点击会立刻把面板关掉；③ 偏好标志在点击时读取，无需增删监听。 */
+    /* 全局点击监听：开启「点击面板外关闭」时，点在面板外就关面板。
+       影子内点击会重定向到 #rlog-shadow-host，故用 e.target === shadowHostEl ||
+       e.composedPath().includes(panelEl) 判定面板内；同时放行插件自己的菜单切换按钮，
+       否则用它打开面板的那次点击会立刻把面板关掉。 */
     if (!document.rlogOutsideCloseListenerInstalled) {
         document.rlogOutsideCloseListenerInstalled = true;
         document.addEventListener('click', (e) => {
             if (!preferences.clickOutside || !isPanelVisible) return;
-            /* 浮标态：点面板外不清除浮标（浮标是插件入口，用户主动收起产生，不应被当待关闭面板处理）；
-               点击浮标本身由浮标自己的 pointerup 处理（恢复面板）。 */
+            /* 浮标态：点面板外不清除浮标（它是用户主动收起产生的入口），点击浮标本身由浮标自己处理 */
             if (isPanelCollapsed) return;
             if (toggleBtn && toggleBtn.contains(e.target)) return;
             const insidePanel = e.target === shadowHostEl || e.composedPath().includes(panelEl);
@@ -5411,7 +6317,7 @@ function buildUI() {
         const normalCount = getNormalRecords().length;
         const pinnedCount = records.length - normalCount;
         if (normalCount === 0) {
-            /* 没有普通记录：统一用轻量提示反馈，不弹确认弹窗、不删除任何记录 */
+            /* 没有普通记录：只给轻量提示，不弹确认弹窗、不删除任何记录 */
             showPinToast(pinnedCount > 0
                 ? '没有可清空的普通记录，置顶记录不会被清除'
                 : '没有可清空的记录');
@@ -5474,7 +6380,7 @@ function buildUI() {
             });
         }
 
-        /* 每个 Toggle：点击翻转状态 + 持久化 + 更新入口图标态（6 项行为均已接入实际行为） */
+        /* 每个 Toggle：点击翻转状态 + 持久化 + 更新入口图标态 */
         const toggles = prefOverlayEl.querySelectorAll('.rlog-toggle');
         toggles.forEach((toggle) => {
             toggle.addEventListener('click', (e) => {
@@ -5486,31 +6392,28 @@ function buildUI() {
             });
         });
 
-        /* 滚动提示箭头：内容需要滚动时更新上下方向提示 */
         const prefListEl = prefOverlayEl.querySelector('.rlog-pref-list');
         if (prefListEl) {
             prefListEl.addEventListener('scroll', () => updatePrefScrollArrows(), { passive: true });
         }
 
-        /* 遮罩点击：什么都不做（既不开也不关）——只作为「盖住面板、阻断底层内容交互」的层。
-           点击浮层外主面板范围不关闭浮层；浮层只能通过右上角 × 关闭。 */
+        /* 遮罩点击什么都不做：它只负责盖住面板、阻断底层交互，浮层只能通过右上角 × 关闭 */
     }
 
-    /* 加载持久化偏好并同步入口图标 + 开关视觉（首次构建面板时初始化） */
+    /* 加载持久化偏好并同步入口图标 + 开关视觉 */
     loadPreferences();
     updatePrefButtonIcon();
     syncPrefToggleUI();
-    /* 移动端全屏：初始化时按偏好 + 当前视口设置全屏类（面板此刻 display:none，样式待展示时生效） */
+    /* 移动端全屏：按偏好 + 当前视口设置全屏类（面板此刻 display:none，样式待展示时生效） */
     updateMobileFullscreenClass();
-    /* 极简模式：初始化时按偏好给影子宿主加/去类（触发 :host 极简规则，关掉全部动效） */
+    /* 极简模式：按偏好给影子宿主加/去类（触发 :host 极简规则） */
     updateMinimalClass();
-    /* 「昼夜模式跟随 ST 主题」：开启时静默同步到 ST 当前主题并挂上主题变化监听
-       （面板此刻 display:none，不播动画；之后打开面板直接用同步后的主题） */
+    /* 「昼夜模式跟随 ST 主题」：开启时静默同步到 ST 当前主题并挂上主题变化监听（此刻不播动画） */
     initPanelThemeFollow(false);
-    /* 筛选状态持久化：开启时读取上次持久化的筛选并覆盖默认真实状态（在 updateFilterChipUI 前生效） */
+    /* 筛选状态持久化：开启时读取上次持久化的筛选覆盖默认值（须在 updateFilterChipUI 前生效） */
     loadPersistedFilterState();
-    /* 「浮标默认入口」：开启时启动默认显示浮标（右上角默认位置），面板保持隐藏、非折叠态，
-       扩展菜单入口不亮 active。badgePos 仍不持久化——刷新/重新初始化回到默认位置。 */
+    /* 「浮标默认入口」：开启时启动默认显示浮标（右上角默认位置），面板保持隐藏、非折叠态；
+       badgePos 仍不持久化——刷新/重新初始化回到默认位置 */
     if (preferences.badgeDefault && badgeEl) {
         if (!badgePos) badgePos = getDefaultBadgePos();
         else badgePos = clampBadgeToViewport(badgePos.left, badgePos.top);
@@ -5521,8 +6424,7 @@ function buildUI() {
 
     panelEl.querySelector('#rlog-theme-btn').addEventListener('click', (e) => {
         e.stopPropagation();
-        /* 「昼夜模式跟随 ST 主题」开启时手动切换不生效：按钮交互不变（仍可点击、图标/title 不变），
-           只是不执行切换，并用插件自己的 toast 提示原因。 */
+        /* 「昼夜模式跟随 ST 主题」开启时手动切换不生效：按钮交互不变，只弹 toast 提示原因 */
         if (preferences.followStTheme) {
             showPinToast('请先关闭自动跟随主题');
             return;
@@ -5535,7 +6437,6 @@ function buildUI() {
     });
     updateThemeButtonIcon();
 
-    /* 绑定总开关 */
     const masterToggleBtn = panelEl.querySelector('#rlog-master-toggle');
     if (masterToggleBtn) {
         masterToggleBtn.addEventListener('click', (e) => {
@@ -5546,11 +6447,9 @@ function buildUI() {
     }
     updateMasterToggleUI();
 
-    /* 加载并应用内容预览开关状态（持久化） */
     contentPreviewEnabled = loadContentPreview();
     updatePreviewToggleUI();
 
-    /* 绑定预览开关事件 */
     const previewToggleEl = panelEl.querySelector('#rlog-preview-btn');
     if (previewToggleEl) {
         previewToggleEl.addEventListener('click', (e) => {
@@ -5562,16 +6461,14 @@ function buildUI() {
     makeDraggable(panelEl);
     makeResizable(panelEl);
 
-    /* 视口/面板宽度变化（含桌面↔移动切换、拖拽改宽）会让记录标题栏换行高度变化， */
-    /* 重测吸顶偏移（--rlog-rec-h） */
+    /* 视口/面板宽度变化（含桌面↔移动切换、拖拽改宽）会让记录标题栏换行高度变化，需重测吸顶偏移 */
     if (!window.rlogHeaderVarResizeInstalled) {
         window.rlogHeaderVarResizeInstalled = true;
         window.addEventListener('resize', () => {
             syncRecordHeaderVars(panelEl && panelEl.querySelector('#rlog-list'));
             /* 桌面↔移动切换时同步浮标尺寸 */
             updateBadgeSize();
-            /* 浮标可见时随视口变化 clamp 回可视区域，避免窗口缩小后浮标跑出屏幕。
-               不限定折叠态：默认入口模式下浮标可能在非折叠态（面板关闭）显示，同样需要 clamp。 */
+            /* 浮标可见时随视口变化夹回可视区域；不限定折叠态——默认入口模式下浮标在非折叠态也会显示 */
             if (badgeEl && badgeEl.classList.contains('rlog-badge-active')) {
                 const pos = clampBadgeToViewport(
                     parseFloat(badgeEl.style.left) || 0,
@@ -5588,12 +6485,17 @@ function buildUI() {
     /* 安装来源识别监听（仅记录用户原生入口，不受总开关影响） */
     installSourceTracking();
 
-    /* 安装 fetch 拦截（hook 始终安装，内部通过 masterEnabled 决定是否记录） */
-    installFetchHook();
-    /* 安装同源 iframe fetch 拦截（酒馆助手等 iframe 内脚本的请求同样捕获） */
-    installIframeFetchHooks();
+    /* 安装主生成轮次跟踪（RQ-32 正向识别的锚点） */
+    installGenerationPassTracking();
+    /* 安装来源修正跟踪（RQ-32：响应落楼后的「插件 → 原生」有限提升） */
+    installSourceCorrectionTracking();
 
-    /* 同步筛选分段按钮视觉状态（默认全开；引导/API 改动过状态时以实际状态为准） */
+    /* 安装请求拦截（fetch + XHR；内部按 masterEnabled 决定是否记录） */
+    installRequestHooks();
+    /* 安装同源 iframe 请求拦截 */
+    installIframeRequestHooks();
+
+    /* 同步筛选分段按钮视觉状态（引导/API 改动过状态时以实际状态为准） */
     updateFilterChipUI();
 
     /* 置顶/取消置顶提示：点击可提前消除（阻止事件冒泡避免触发文档级「点击面板外关闭」） */
@@ -5616,21 +6518,17 @@ function updateThemeButtonIcon() {
         : '<i class="fa-solid fa-sun"></i>';
 }
 
-/* 昼/夜主题切换动画（缩放呼吸 + 颜色渐变）：只在主动切换时播放，不在打开窗口时触发；
-   昼/夜按钮与「跟随 ST 主题」自动切换复用同一段编排。
+/* 昼/夜主题切换动画（缩放呼吸 + 颜色渐变）：昼/夜按钮与「跟随 ST 主题」自动切换复用同一段编排。
    前提：调用前 isLightTheme 已更新、主题类已应用。 */
 function playThemeSwitchAnimation() {
     if (!panelEl) return;
     panelEl.classList.remove('rlog-anim-light', 'rlog-anim-dark');
 
-    /* 极简模式：主题已通过 applyTheme() 瞬时切换，跳过缩放呼吸/颜色渐变编排，
-       避免 animation:none 下 animationend 不触发导致动画类残留。 */
+    /* 极简模式：主题已通过 applyTheme() 瞬时切换，跳过动画编排（也避免动画类残留） */
     if (preferences.minimal) return;
 
-    /* 移动端（窄屏）禁用颜色过渡快速切换：大量展开消息时同时做 0.35s 渐变会明显卡顿， */
-    /* 主题色在双 RAF 后瞬间切换完成再播放缩放动画； */
-    /* 桌面端保留原有渐变特效（void offsetWidth 强制回流以重置动画状态）。 */
-    /* 注：禁用过渡不影响最终颜色，只是不播放颜色渐变过程。 */
+    /* 移动端（窄屏）禁用颜色过渡快速切换：大量展开消息时做 0.35s 渐变会明显卡顿，
+       主题色在双 RAF 后瞬间切换完成再播放缩放动画；桌面端保留渐变特效 */
     const isMobile = window.matchMedia('(max-width: 768px)').matches;
     if (isMobile) {
         panelEl.classList.add('rlog-theme-transitioning');
@@ -5645,7 +6543,6 @@ function playThemeSwitchAnimation() {
             });
         });
     } else {
-        /* 桌面端：保留渐变过渡 + 强制回流重启动画 */
         void panelEl.offsetWidth;
         if (isLightTheme) {
             panelEl.classList.add('rlog-anim-light');
@@ -5654,7 +6551,7 @@ function playThemeSwitchAnimation() {
         }
     }
 
-    /* 动画结束后自动清除动画类，防止关闭再打开窗口时重新触发残留动画 */
+    /* 动画结束后清除动画类，防止关闭再打开窗口时重播 */
     const onAnimEnd = () => {
         panelEl.classList.remove('rlog-anim-light', 'rlog-anim-dark');
         panelEl.removeEventListener('animationend', onAnimEnd);
@@ -5668,24 +6565,23 @@ function togglePanel() {
 
 function showPanel() {
     if (!panelEl) buildUI();
-    /* 兜底：确保从浮标/折叠态回到展开面板（正常流程经 hidePanel 已复位，此处防御） */
+    /* 兜底：确保从浮标/折叠态回到展开面板 */
     setBadgeActive(false);
     panelEl.classList.remove('rlog-window-collapsed');
     isPanelCollapsed = false;
-    /* 「浮标默认入口」：重新打开面板一律回到插件默认位置/尺寸（点浮标与扩展菜单入口两个打开路径统一，
-       与「折叠→浮标→点浮标恢复」语义一致）；非默认入口维持原展示位置。 */
+    /* 「浮标默认入口」：重新打开面板一律回到插件默认位置/尺寸（两个打开路径统一）；
+       非默认入口维持原展示位置 */
     if (preferences.badgeDefault) resetPanelToDefault();
     panelEl.style.display = 'flex';
     isPanelVisible = true;
-    /* 移动端全屏：打开面板时应用/撤销全屏类（偏好开启 + 移动端视口才生效） */
+    /* 移动端全屏：偏好开启 + 移动端视口才生效 */
     updateMobileFullscreenClass();
     if (toggleBtn) toggleBtn.classList.add('active');
     /* 仅当数据/渲染设置变化时才重建 DOM；否则保留原有 DOM，避免大量展开消息时打开面板卡顿 */
     if (panelContentDirty) {
         renderPanelContent();
     }
-    /* 面板显示后重测记录标题栏高度：隐藏状态下渲染时 offsetHeight 为 0， */
-    /* 消息标题栏的吸顶偏移（--rlog-rec-h）必须以可见状态的实际高度为准 */
+    /* 面板显示后重测记录标题栏高度：隐藏状态下 offsetHeight 为 0，吸顶偏移需以可见高度为准 */
     syncRecordHeaderVars(panelEl.querySelector('#rlog-list'));
     /* 面板关闭期间有新记录到达时，重新打开后回到列表顶部最新一条 */
     if (pendingScrollToTop && !isPanelCollapsed) {
@@ -5701,7 +6597,7 @@ function showPanel() {
         }
     }
 
-    /* 在面板显示后检查是否需要进行引导 */
+    /* 面板显示后检查是否需要进行引导 */
     if (window.__RLogTour && typeof window.__RLogTour.check === 'function') {
         setTimeout(() => window.__RLogTour.check(), 300);
     }
@@ -5735,8 +6631,8 @@ function hidePanel() {
     }
     isPanelVisible = false;
     if (toggleBtn) toggleBtn.classList.remove('active');
-    /* 「浮标默认入口」：关闭面板后浮标回到 badgePos（为空则用右上默认位置），浮标仍不持久化；
-       非默认入口保持现状——面板完全关闭、浮标消失。 */
+    /* 「浮标默认入口」：关闭面板后浮标回到 badgePos（为空则用右上默认位置），仍不持久化；
+       非默认入口保持原状——面板完全关闭、浮标消失 */
     if (preferences.badgeDefault && badgeEl) {
         if (!badgePos) badgePos = getDefaultBadgePos();
         else badgePos = clampBadgeToViewport(badgePos.left, badgePos.top);
@@ -5763,9 +6659,8 @@ function makeResizable(el) {
         resizeStartY = e.clientY;
         resizeStartW = el.offsetWidth;
         resizeStartH = el.offsetHeight;
-        /* 锚定左/上边缘：面板默认是水平居中定位（left:50% + translateX(-50%)）， */
-        /* 若只改 width，左右两侧会对称移动；与标题栏拖拽一样改为 left/top 定位后， */
-        /* 缩放只影响右/下边缘（右下角小三角的常规行为）。 */
+        /* 锚定左/上边缘：面板默认水平居中（left:50% + translateX(-50%)），只改 width 会左右对称
+           移动；改为 left/top 定位后缩放只影响右/下边缘 */
         const rect = el.getBoundingClientRect();
         el.style.transform = 'none';
         el.style.left = `${rect.left}px`;
@@ -5832,14 +6727,12 @@ function makeResizable(el) {
     });
 })();
 
-/* 浮标拖拽/点击交互（Pointer Events 统一鼠标与触屏）。
-   拖动只移动浮标自身；拖动结束时不能误触发 click 恢复面板——用位移阈值区分：
-   位移 > BADGE_DRAG_THRESHOLD 视为拖动，pointerup 时不再恢复；未达到阈值视为点击，恢复面板。 */
+/* 浮标拖拽/点击交互（Pointer Events 统一鼠标与触屏）：位移 > BADGE_DRAG_THRESHOLD 视为拖动，
+   pointerup 时不恢复面板；未达到阈值视为点击，恢复面板 */
 function initBadgeInteraction() {
     if (!badgeEl) return;
-    /* 点击浮标恢复面板后，浮标随即隐藏、同坐标出现面板；浏览器随后派发的原生 click
-       会被 hit-test 到该位置的面板按钮/标题上（误开「更多/筛选」抽屉或误触折叠）。
-       这里用 document 捕获阶段一次性守卫按 badgeSuppressNextClick 标记拦掉这一次 click。 */
+    /* 点浮标恢复面板后浮标隐藏、同坐标出现面板，浏览器随后派发的原生 click 会 hit-test 到该位置的
+       面板按钮/标题上（误开抽屉或误触折叠）；用捕获阶段的一次性守卫按标记拦掉 */
     if (!document.rlogBadgeClickGuardInstalled) {
         document.rlogBadgeClickGuardInstalled = true;
         document.addEventListener('click', (e) => {
@@ -5898,16 +6791,14 @@ function initBadgeInteraction() {
             dragged = false;
             return;
         }
-        /* 未拖动：这里不再打开面板/隐藏浮标，交给随后的 click 阶段处理。
-           让浮标在整个 click 事件派发期间保持可见，需要在该阶段识别它的第三方插件不会因我们提前隐藏而失效；
-           面板打开延后到 click 之后（下面 click 监听里 setTimeout），因此面板也不会误接同一次 click。 */
+        /* 未拖动：打开面板交给随后的 click 阶段处理——让浮标在整个 click 派发期间保持可见，
+           面板打开延后到 click 之后，两者不会互相误接同一次 click */
         dragged = false;
     };
     badgeEl.addEventListener('pointerup', onBadgeUp);
     badgeEl.addEventListener('pointercancel', onBadgeUp);
-    /* 浮标 click（含第三方对 host 直接触发的原生 click）：拖拽后的补发 click 已被
-       badgeSuppressNextClick 拦掉；这里只把「打开面板」延后到本次 click 全部派发完之后，
-       保持浮标在该阶段可见；不主动 stopPropagation（各 state 已保证不会误关面板）。 */
+    /* 浮标 click（含第三方对 host 直接触发的原生 click）：把「打开面板」延后到本次 click
+       全部派发完之后，保持浮标在该阶段可见；不主动 stopPropagation */
     badgeEl.addEventListener('click', (e) => {
         /* 兜底：若拖拽后的 click 未被上游拦掉（极少数），这里再拦一次 */
         if (badgeSuppressNextClick) return;
@@ -6040,8 +6931,8 @@ window.__RLogApi = {
     records: () => records,
     /* 面板/影子根访问（供 tour.js 使用）：面板已挂进影子根，document 查找不到，改从这里取 */
     getPanelEl: () => panelEl,
-    /* 浮标访问（测试辅助）：真实浮标已拆为 light DOM host #rlog-badge-host（视觉在其 shadow root 内），
-       document 可直接查到该 host；可见视觉元素用 getBadgeVisualEl() 获取。 */
+    /* 浮标访问（测试辅助）：light DOM host 可用 document 查到（视觉在其 shadow root 内），
+       可见视觉元素用 getBadgeVisualEl() 获取 */
     getBadgeEl: () => badgeEl,
     getBadgeVisualEl: () => badgeVisualEl,
     q: (sel) => (panelShadowRoot ? panelShadowRoot.querySelector(sel) : null),
@@ -6114,8 +7005,8 @@ window.__RLogApi = {
         panelContentDirty = true;
         if (panelEl && isPanelVisible) renderPanelContent();
     },
-    /* 重置筛选（供引导/回归测试/外部调用）。
-       引导开始时用它把筛选重置为全开以展示 demo，故不落盘；用户手动重置走界面按钮 resetFilters()（默认持久化）。 */
+    /* 重置筛选（供引导/回归测试/外部调用）：引导开始时用它把筛选重置为全开以展示 demo，故不落盘；
+       用户手动重置走界面按钮 resetFilters()（默认持久化） */
     resetFilters: () => resetFilters(false),
     toggleFilterChip: (group, value) => toggleFilterChip(group, value),
     getVisibleRecordsCount: () => getVisibleRecords().length,
@@ -6171,8 +7062,7 @@ window.__RLogApi = {
 let replyTimeoutOverrideMs = null;
 
 /* 一键注入全部测试数据（临时功能，后续删除）：8 条 Token 区间记录 + 成功/失败回复模拟 +
-   触发一次 2 秒超时收尾。入口：移动端点「更多」抽屉里的烧瓶按钮，桌面端也可在控制台执行
-   window.__RLogApi.injectTokenTierTest() */
+   一次 2 秒超时收尾；入口为「更多」抽屉里的烧瓶按钮或控制台 __RLogApi.injectTokenTierTest() */
 window.__RLogApi.injectTokenTierTest = function injectTokenTierTest() {
         /* 每个区间的典型 token 数（对应 getTokenTier 的边界） */
         const tierValues = [
@@ -6273,8 +7163,7 @@ window.__RLogApi.injectTokenTierTest = function injectTokenTierTest() {
             });
         }
     };
-    /* 临时调试功能（后续删除）：模拟回复超时——把 5 分钟缩短成 2 秒，走真实超时收尾流程，
-       记录出现 Timeout 标记并保留已收到的半截内容（若有）。
+    /* 临时调试功能（后续删除）：模拟回复超时——把 5 分钟缩短成 2 秒，走真实超时收尾流程
        @param {object} [opts] { reasoning, content } @returns {number|null} captureId */
 
 window.__RLogApi.simulateReplyTimeout = function simulateReplyTimeout(opts = {}) {
@@ -6320,7 +7209,7 @@ function buildTempTestButton(panelEl) {
     btn.title = '注入测试数据（Token 区间 / 成功 / 失败 / 超时）';
     btn.innerHTML = '<i class="fa-solid fa-vial"></i>';
     /* 测试按钮插到「偏好设置」按钮之后（保证顺序：总开关-引导-偏好设置-测试-预览-删除-昼夜）；
-       偏好设置按钮已被临时移除时兜底插到「引导」之后。 */
+       找不到时兜底插到「引导」之后 */
     const prefBtn = panelEl.querySelector('#rlog-pref-btn');
     const anchor = prefBtn || panelEl.querySelector('#rlog-help-btn');
     if (anchor) {
