@@ -27,3 +27,25 @@ Implemented and pushed record text export. Added default-format full-view TXT do
 ### Status
 
 [OK] **Completed**
+
+
+## Session 2: Fix export button icon
+<!-- trellis-session: v=2 fp=2d2f6706b1ffda1f -->
+
+**Date**: 2026-10-21
+**Task**: Fix export button icon
+**Branch**: `main`
+
+### Summary
+
+修复导出文本按钮的 Shadow DOM Font Awesome 图标映射，确认折叠态隐藏规则，补充前端图标约定并完成验证。已提交并推送到 origin/main。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5cb8a7f812cb488ceb57b37652a1e4dae5fabba6` | fix: restore export button icon |
+
+### Status
+
+[OK] **Completed**
