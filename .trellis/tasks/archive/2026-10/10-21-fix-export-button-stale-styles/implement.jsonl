@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Preserve the existing export contract and verify the actual Shadow DOM/UI behavior."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse the existing record action visual class without duplicating button styles, while keeping event responsibilities separate."}

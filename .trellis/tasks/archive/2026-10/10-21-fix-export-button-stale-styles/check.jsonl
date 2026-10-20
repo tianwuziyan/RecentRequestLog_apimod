@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Review folded/expanded action styling and export behavior against the frontend contract."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Check compatibility-class reuse and ensure no accidental duplicate event binding."}
