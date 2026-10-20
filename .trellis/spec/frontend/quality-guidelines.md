@@ -93,3 +93,25 @@ provide the `::before` glyph content across the Shadow DOM boundary.
 When adding an icon, search the mapping and the markup together, add the
 correct Font Awesome solid code point to the mapping, and verify the generated
 shim rule before treating the button as complete.
+
+## Shadow DOM Stylesheet Freshness Contract
+
+The Shadow DOM stylesheet loader may synchronously serialize the host plugin
+stylesheet for early layout measurements, but it must not silently reuse a
+stale serialized stylesheet. Before using the cached CSS, verify the selectors
+required by the current record actions, including both
+`.rlog-export-text-btn` and `.rlog-record.collapsed .rlog-export-text-btn`.
+
+If either selector is missing, keep the action's semantic class independent and
+load the same `style.css` through the existing Shadow DOM link path with a
+cache-busting query parameter. The normal path should remain synchronous; the
+cache-busted path is only a compatibility fallback for stale host CSS.
+
+```js
+const hasCurrentExportRules = selfCssTextCache.includes('.rlog-export-text-btn')
+    && selfCssTextCache.includes('.rlog-record.collapsed .rlog-export-text-btn');
+if (!hasCurrentExportRules) return buildSelfCssLink(true);
+```
+
+Do not fix stale CSS by borrowing another button's semantic class or handler;
+that hides the stylesheet loading problem and couples unrelated actions.

@@ -103,7 +103,7 @@ const FA_SOLID_CONTENT = {
     'comment-dots': '\\f4ad',
     'compress-alt': '\\f422',
     'copy': '\\f0c5',
-    'download': '\\f019',
+    'file-arrow-down': '\\f56d',
     'ellipsis': '\\f141',
     'eye': '\\f06e',
     'eye-slash': '\\f070',
@@ -4755,7 +4755,7 @@ function renderPanelContent() {
                                     <i class="fa-solid fa-file-lines"></i>
                                 </button>
                                 <button class="rlog-export-text-btn" data-record="${idx}" title="导出文本">
-                                    <i class="fa-solid fa-download"></i>
+                                    <i class="fa-solid fa-file-arrow-down"></i>
                                 </button>
                                 <button class="rlog-delete-record-btn" data-record="${idx}" title="删除本条记录">
                                     <i class="fa-solid fa-trash-can"></i>
@@ -6728,6 +6728,11 @@ function buildSelfCssElement() {
             if (selfCssTextCache === null) {
                 selfCssTextCache = [...link.sheet.cssRules].map(r => r.cssText).join('\n');
             }
+            const hasCurrentExportRules = selfCssTextCache.includes('.rlog-export-text-btn')
+                && selfCssTextCache.includes('.rlog-record.collapsed .rlog-export-text-btn');
+            if (!hasCurrentExportRules) {
+                return buildSelfCssLink(true);
+            }
             const style = document.createElement('style');
             style.textContent = selfCssTextCache;
             return style;
@@ -6738,12 +6743,19 @@ function buildSelfCssElement() {
     return buildSelfCssLink();
 }
 
-/* 影子内样式源（兜底）：直接引用本插件自身的 style.css 文件（浏览器缓存复用，不重复加载内容） */
-function buildSelfCssLink() {
+/* 影子内样式源（兜底）：直接引用本插件自身的 style.css；stale 样式路径会附加 cache-bust 参数 */
+function buildSelfCssLink(cacheBust = false) {
     const link = document.createElement('link');
     link.rel = 'stylesheet';
     link.type = 'text/css';
-    link.href = getSelfCssUrl();
+    const selfCssUrl = getSelfCssUrl();
+    if (cacheBust) {
+        const cacheBustedUrl = new URL(selfCssUrl, document.baseURI || location.href);
+        cacheBustedUrl.searchParams.set('rlog_css_refresh', String(Date.now()));
+        link.href = cacheBustedUrl.href;
+    } else {
+        link.href = selfCssUrl;
+    }
     return link;
 }
 
