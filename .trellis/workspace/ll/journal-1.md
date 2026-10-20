@@ -49,3 +49,25 @@ Implemented and pushed record text export. Added default-format full-view TXT do
 ### Status
 
 [OK] **Completed**
+
+
+## Session 3: 修复导出按钮图标与 Shadow DOM 样式回归
+<!-- trellis-session: v=2 fp=0f8e521a566eb211 -->
+
+**Date**: 2026-10-21
+**Task**: 修复导出按钮图标与 Shadow DOM 样式回归
+**Branch**: `main`
+
+### Summary
+
+完成导出按钮样式回归修复：保留独立语义类，切换为 file-arrow-down 图标；检测 Shadow DOM 旧 CSS 并在失配时使用缓存破坏链接加载当前样式。补充前端质量规范，完成 JavaScript 语法、差异和针对性静态断言验证。已提交并准备推送，真实 SillyTavern 宿主仍需刷新扩展后做折叠/展开视觉验收。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7eaea7b` | fix: repair export button styles |
+
+### Status
+
+[OK] **Completed**
