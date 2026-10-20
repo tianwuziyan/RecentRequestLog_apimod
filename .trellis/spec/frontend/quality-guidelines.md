@@ -115,3 +115,12 @@ if (!hasCurrentExportRules) return buildSelfCssLink(true);
 
 Do not fix stale CSS by borrowing another button's semantic class or handler;
 that hides the stylesheet loading problem and couples unrelated actions.
+
+## Shadow DOM Stylesheet URL Discovery Contract
+
+The stylesheet loader must derive the plugin CSS URL from the loaded
+`RecentRequestLog*/index.js` script so forks and upstream installations use
+their own sibling `style.css`. If a stylesheet link with the same URL path is
+already loaded, reuse that link and preserve its query/version parameters.
+When runtime script discovery is unavailable, retain the legacy exact-link-id
+lookup and hardcoded upstream path as compatibility fallbacks.

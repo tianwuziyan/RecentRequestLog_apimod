@@ -6706,13 +6706,29 @@ function closeDrawerInstant(drawer, btn) {
     drawer.style.transition = '';
 }
 
-/* 定位本插件自身的 style.css 真实地址：优先用 ST 已注入的插件样式 <link>（id 形如 "<目录>-css"），
-   找不到时回退硬编码路径。不用 import.meta：ST 以 ES Module 加载时 document.currentScript 为 null，
-   且逻辑测试用 Node VM 载入本文件（非 module）。 */
+/* 定位本插件自身的 style.css 真实地址：优先从当前插件 index.js 的同目录推导，
+   并复用同路径的已加载样式链接（保留其 query/version 参数）；运行时发现不可用时
+   再兼容 ST 的旧 link id 与上游硬编码路径。不用 import.meta：ST 以 ES Module 加载时
+   document.currentScript 为 null，且逻辑测试用 Node VM 载入本文件（非 module）。 */
 function getSelfCssUrl() {
     try {
-        const link = [...document.querySelectorAll('link[rel="stylesheet"]')].find(l => l.id && l.id.endsWith('RecentRequestLog-css'));
-        if (link) return link.href;
+        const baseUrl = document.baseURI || location.href;
+        const stylesheetLinks = [...document.querySelectorAll('link[rel="stylesheet"]')];
+        const pluginScript = [...document.querySelectorAll('script[src]')].find((script) => {
+            const scriptUrl = new URL(script.src || script.getAttribute('src'), baseUrl);
+            return /\/RecentRequestLog[^/]*\/index\.js$/i.test(scriptUrl.pathname);
+        });
+        if (pluginScript) {
+            const scriptUrl = new URL(pluginScript.src || pluginScript.getAttribute('src'), baseUrl);
+            const derivedCssUrl = new URL('style.css', scriptUrl.href);
+            const loadedStylesheet = stylesheetLinks.find((stylesheet) => {
+                return new URL(stylesheet.href, baseUrl).pathname === derivedCssUrl.pathname;
+            });
+            return loadedStylesheet ? loadedStylesheet.href : derivedCssUrl.href;
+        }
+
+        const compatibilityLink = stylesheetLinks.find((link) => link.id && link.id.endsWith('RecentRequestLog-css'));
+        if (compatibilityLink) return compatibilityLink.href;
     } catch (e) { /* 无 document（如逻辑测试 VM 不执行到此）或异常，走兜底 */ }
     return '/scripts/extensions/third-party/RecentRequestLog/style.css';
 }

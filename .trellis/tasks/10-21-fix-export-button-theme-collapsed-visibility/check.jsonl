@@ -1,0 +1,2 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Check the final stylesheet discovery, Shadow DOM CSS, and export-button contracts against the documented rules."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Check that the fix extends the existing style injection path without duplicating button handlers or unrelated CSS systems."}

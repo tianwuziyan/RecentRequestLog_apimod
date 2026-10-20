@@ -1,0 +1,2 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Frontend Shadow DOM stylesheet and icon contracts govern the resolver and validation."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"The resolver changes an existing shared stylesheet-loading path and must preserve its single source of truth."}
