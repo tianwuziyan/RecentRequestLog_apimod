@@ -142,6 +142,14 @@ of that replay model.
 - [ ] Similar patterns follow same structure
 - [ ] Reducer/action transitions live in one reducer or command dispatcher
 
+### Gotcha: Shadow DOM Font Awesome registrations
+
+When adding a `fa-solid fa-*` icon to extension markup, search both the markup
+and `FA_SOLID_CONTENT` in `index.js`. The icon class and the Shadow DOM shim
+mapping are two required parts of the same registration; updating only the
+markup produces an empty button box even though the button's layout and event
+handler still work.
+
 ---
 
 ## Gotcha: Python if/elif/else Exhaustive Check

@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Check the rendered icon mapping fix and preserve export behavior."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Review scope and ensure no duplicate icon mechanism was introduced."}

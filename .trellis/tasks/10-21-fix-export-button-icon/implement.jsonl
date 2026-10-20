@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Keep the existing record-export contract and validate the focused frontend change."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "The fix changes the existing shared icon mapping; search and extend it instead of adding a parallel icon mechanism."}

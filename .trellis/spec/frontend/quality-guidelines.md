@@ -82,3 +82,14 @@ if (typeof record.reply?.content === 'string' && record.reply.content.length > 0
 When reviewing this behavior, verify the two download counts, the exact source
 strings, filename sanitization, and the unchanged action-button behavior in the
 host UI.
+
+## Shadow DOM Font Awesome Icon Contract
+
+Icons rendered inside the extension's Shadow DOM must be registered in
+`FA_SOLID_CONTENT` in `index.js` as well as referenced by their `fa-solid
+fa-*` class in markup. The document-level Font Awesome stylesheet does not
+provide the `::before` glyph content across the Shadow DOM boundary.
+
+When adding an icon, search the mapping and the markup together, add the
+correct Font Awesome solid code point to the mapping, and verify the generated
+shim rule before treating the button as complete.

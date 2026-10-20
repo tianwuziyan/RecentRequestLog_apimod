@@ -91,7 +91,7 @@ const SOURCE_CORRECTION_MIN_OVERLAP = 24;     /* 修正匹配的最小重叠长�
 const SENSITIVE_BODY_FIELDS = ['proxy_password'];
 const SENSITIVE_BODY_MASK = '***';
 
-/* 影子内 FA 固壳：仅插件实际使用的 33 个实心图标（content 取自 ST 现版 fontawesome.min.css 6.5.2，非猜测）
+/* 影子内 FA 固壳：仅插件实际使用的 34 个实心图标（content 取自 ST 现版 fontawesome.min.css 6.5.2，非猜测）
    新增图标时在此补一行「图标名: '\\fXXX'」即可 */
 const FA_SOLID_CONTENT = {
     'arrow-down': '\\f063',
@@ -103,6 +103,7 @@ const FA_SOLID_CONTENT = {
     'comment-dots': '\\f4ad',
     'compress-alt': '\\f422',
     'copy': '\\f0c5',
+    'download': '\\f019',
     'ellipsis': '\\f141',
     'eye': '\\f06e',
     'eye-slash': '\\f070',
@@ -6748,7 +6749,7 @@ function buildSelfCssLink() {
 
 /* 影子内 FA 固壳：文档级 @font-face / .fa 规则进不了影子，这里在影子内补最小可用的一层。
    - @font-face 复用 ST 现有 fa-solid-900 字体文件（绝对地址，不下载不复制）
-   - 只写插件实际使用的 33 个图标的 ::before content；新增图标在 FA_SOLID_CONTENT 补一行 */
+   - 只写插件实际使用的 34 个图标的 ::before content；新增图标在 FA_SOLID_CONTENT 补一行 */
 function buildFaShimStyle() {
     const style = document.createElement('style');
     const faWoff2 = new URL('webfonts/fa-solid-900.woff2', location.href).href;
