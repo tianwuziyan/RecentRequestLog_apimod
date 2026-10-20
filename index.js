@@ -4753,6 +4753,9 @@ function renderPanelContent() {
                                 <button class="rlog-read-full-btn" data-record="${idx}" title="查看全文">
                                     <i class="fa-solid fa-file-lines"></i>
                                 </button>
+                                <button class="rlog-export-text-btn" data-record="${idx}" title="导出文本">
+                                    <i class="fa-solid fa-download"></i>
+                                </button>
                                 <button class="rlog-delete-record-btn" data-record="${idx}" title="删除本条记录">
                                     <i class="fa-solid fa-trash-can"></i>
                                 </button>
@@ -5106,6 +5109,13 @@ function bindListEvents(listEl) {
             e.stopPropagation();
             const idx = Number(this.dataset.record);
             openReadFullOverlay(idx);
+        });
+    });
+
+    listEl.querySelectorAll('.rlog-export-text-btn').forEach((btn) => {
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            downloadRecordText(Number(this.dataset.record));
         });
     });
 
@@ -5575,6 +5585,38 @@ async function copySingleMessage(recIdx, msgIdx, btnEl) {
     const msg = getMessageByIndex(records[recIdx], msgIdx);
     if (!msg) return;
     await doCopy(msg.content, btnEl);
+}
+
+function sanitizeDownloadFilename(value) {
+    return String(value || '')
+        .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
+        .replace(/[. ]+$/g, '')
+        .trim() || PLUGIN_KEY;
+}
+
+function downloadTextFile(filename, content) {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function downloadRecordText(index) {
+    const record = records[index];
+    if (!record) return;
+
+    const baseName = sanitizeDownloadFilename(`${PLUGIN_KEY}_${record.characterName}_${record.timestamp}`);
+    downloadTextFile(`${baseName}_全文.txt`, getReadContent(record, 'formatted'));
+
+    const replyContent = record.reply && record.reply.content;
+    if (typeof replyContent === 'string' && replyContent.length > 0) {
+        downloadTextFile(`${baseName}_RESPONSE.txt`, replyContent);
+    }
 }
 
 async function doCopy(text, btnEl) {

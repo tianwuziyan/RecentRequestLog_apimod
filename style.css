@@ -1060,6 +1060,7 @@
 }
 
 .rlog-read-full-btn,
+.rlog-export-text-btn,
 .rlog-msg-collapse-btn,
 .rlog-msg-expand-btn,
 .rlog-jump-bottom-btn,
@@ -1079,6 +1080,7 @@
     justify-content: center;
 }
 .rlog-read-full-btn:hover,
+.rlog-export-text-btn:hover,
 .rlog-msg-collapse-btn:hover,
 .rlog-msg-expand-btn:hover,
 .rlog-jump-bottom-btn:hover { background: var(--rlog-hover-bg); color: var(--rlog-text-strong); }
@@ -1103,6 +1105,7 @@
 
 /* 折叠时瞬间隐藏操作按钮（保留箭头），搜索按钮与同排其他按钮行为一致 */
 .rlog-record.collapsed .rlog-read-full-btn,
+.rlog-record.collapsed .rlog-export-text-btn,
 .rlog-record.collapsed .rlog-msg-collapse-btn,
 .rlog-record.collapsed .rlog-msg-expand-btn,
 .rlog-record.collapsed .rlog-jump-bottom-btn,
@@ -1180,6 +1183,7 @@
 .rlog-record.rlog-searching .rlog-msg-expand-btn,
 .rlog-record.rlog-searching .rlog-msg-collapse-btn,
 .rlog-record.rlog-searching .rlog-read-full-btn,
+.rlog-record.rlog-searching .rlog-export-text-btn,
 .rlog-record.rlog-searching .rlog-jump-bottom-btn,
 .rlog-record.rlog-searching .rlog-delete-record-btn {
     visibility: hidden;
@@ -2601,6 +2605,7 @@ mark.rlog-search-mark-current {
         height: 9px;
     }
     .rlog-read-full-btn,
+    .rlog-export-text-btn,
     .rlog-msg-collapse-btn,
     .rlog-msg-expand-btn,
     .rlog-jump-bottom-btn,

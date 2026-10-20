@@ -115,7 +115,7 @@
         },
         {
             targetSelector: '.rlog-record[data-record-index="0"] .rlog-record-actions-inner',
-            desc: '<strong>展开时显示：</strong><br>• 搜索<br>• 展开/折叠内部所有消息<br>• 快速置底<br>• 查看全文（复制整条请求）<br>• 删除本条记录'
+            desc: '<strong>展开时显示：</strong><br>• 搜索<br>• 展开/折叠内部所有消息<br>• 快速置底<br>• 查看全文（默认格式，可复制）<br>• 导出文本（下载默认格式全文及 RESPONSE）<br>• 删除本条记录'
         },
         {
             targetSelector: '.rlog-search-box',
